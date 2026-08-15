@@ -1,0 +1,128 @@
+[
+  {
+    "event": "charge.success",
+    "data": {
+      "id": 4210771,
+      "domain": "live",
+      "status": "success",
+      "reference": "PSK_9f3a2c",
+      "amount": 1000000,
+      "message": null,
+      "gateway_response": "Successful",
+      "paid_at": "2026-08-13T09:14:22.000Z",
+      "created_at": "2026-08-13T09:14:02.000Z",
+      "channel": "card",
+      "currency": "NGN",
+      "ip_address": "102.89.34.11",
+      "metadata": 0,
+      "fees": 25000,
+      "customer": {
+        "id": 88213,
+        "first_name": "Amaka",
+        "last_name": "Okafor",
+        "email": "amaka@example.com",
+        "customer_code": "CUS_3kd91xzq0",
+        "phone": null,
+        "metadata": null,
+        "risk_action": "default"
+      },
+      "authorization": {
+        "authorization_code": "AUTH_k2p9wz",
+        "bin": "506099",
+        "last4": "4412",
+        "exp_month": "04",
+        "exp_year": "2029",
+        "card_type": "verve DEBIT",
+        "bank": "Guaranty Trust Bank",
+        "country_code": "NG",
+        "brand": "verve",
+        "reusable": true
+      },
+      "plan": {}
+    }
+  },
+  {
+    "event": "charge.success",
+    "data": {
+      "id": 4210772,
+      "domain": "live",
+      "status": "success",
+      "reference": "PSK_5d81be",
+      "amount": 250000,
+      "message": null,
+      "gateway_response": "Approved",
+      "paid_at": "2026-08-13T11:47:05.000Z",
+      "created_at": "2026-08-13T11:46:51.000Z",
+      "channel": "bank_transfer",
+      "currency": "NGN",
+      "ip_address": "197.210.70.4",
+      "metadata": 0,
+      "fees": 13750,
+      "customer": {
+        "id": 88214,
+        "first_name": "Tunde",
+        "last_name": "Bello",
+        "email": "tunde@example.com",
+        "customer_code": "CUS_7ba02mnq1",
+        "phone": null,
+        "metadata": null,
+        "risk_action": "default"
+      },
+      "authorization": {
+        "authorization_code": "AUTH_qq31vb",
+        "bin": "539983",
+        "last4": "0091",
+        "exp_month": "11",
+        "exp_year": "2028",
+        "card_type": "mastercard DEBIT",
+        "bank": "Access Bank",
+        "country_code": "NG",
+        "brand": "mastercard",
+        "reusable": true
+      },
+      "plan": {}
+    }
+  },
+  {
+    "event": "charge.success",
+    "data": {
+      "id": 4210773,
+      "domain": "live",
+      "status": "success",
+      "reference": "PSK_c07e14",
+      "amount": 10000,
+      "message": null,
+      "gateway_response": "Approved by Financial Institution",
+      "paid_at": "2026-08-14T08:02:44.000Z",
+      "created_at": "2026-08-14T08:02:30.000Z",
+      "channel": "card",
+      "currency": "NGN",
+      "ip_address": "41.242.49.37",
+      "metadata": 0,
+      "fees": 150,
+      "customer": {
+        "id": 88215,
+        "first_name": "Ngozi",
+        "last_name": "Eze",
+        "email": "ngozi@example.com",
+        "customer_code": "CUS_9wz11kdp2",
+        "phone": null,
+        "metadata": null,
+        "risk_action": "default"
+      },
+      "authorization": {
+        "authorization_code": "AUTH_m0x4rt",
+        "bin": "506102",
+        "last4": "7730",
+        "exp_month": "02",
+        "exp_year": "2027",
+        "card_type": "verve DEBIT",
+        "bank": "Zenith Bank",
+        "country_code": "NG",
+        "brand": "verve",
+        "reusable": true
+      },
+      "plan": {}
+    }
+  }
+]

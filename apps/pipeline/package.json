@@ -1,0 +1,21 @@
+{
+  "name": "@recon/pipeline",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The deployable: migrates the ledger and drives ingest end to end.",
+  "type": "module",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc --build",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@recon/canon": "0.0.0",
+    "@recon/ingest": "0.0.0",
+    "@recon/ledger-core": "0.0.0",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2"
+  }
+}

@@ -1,0 +1,19 @@
+# Host artefacts must never leak into the build context: node_modules is platform-specific
+# (a Windows install would break inside Alpine), and dist would let a stale local build
+# masquerade as the one the image compiled.
+node_modules
+**/node_modules
+dist
+**/dist
+*.tsbuildinfo
+**/*.tsbuildinfo
+
+.git
+.gitignore
+.env
+.env.*
+docs
+*.md
+Dockerfile
+.dockerignore
+docker-compose.yml

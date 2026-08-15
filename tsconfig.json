@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/canon" },
+    { "path": "packages/ledger-core" },
+    { "path": "packages/ingest" },
+    { "path": "apps/pipeline" }
+  ]
+}

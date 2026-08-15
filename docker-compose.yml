@@ -1,0 +1,44 @@
+# The whole system, as one unit: the service and the database it needs.
+#
+#   docker compose up --build        run it
+#   docker compose down -v           throw the ledger away and start from an empty history
+#
+# The database is a separate container because Postgres is not part of our app — it is
+# its own program with its own world. Composing them here is what turns two images into
+# one system.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: recon
+      POSTGRES_PASSWORD: recon
+      POSTGRES_DB: recon
+    ports:
+      # Exposed for local inspection with psql. Remove this line for any deployment
+      # where the database should only be reachable from the service.
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The service must not start migrating against a Postgres that is still booting;
+      # "the container is running" and "the database accepts connections" are not the
+      # same event, and the gap between them is where flaky startups live.
+      test: ['CMD-SHELL', 'pg_isready -U recon -d recon']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  pipeline:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://recon:recon@postgres:5432/recon
+    # Override to run any other command against the same system, e.g.
+    #   docker compose run --rm pipeline node apps/pipeline/dist/main.js balances
+    command: ['node', 'apps/pipeline/dist/main.js', 'demo']
+
+volumes:
+  pgdata:

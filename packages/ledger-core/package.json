@@ -1,0 +1,27 @@
+{
+  "name": "@recon/ledger-core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The double-entry engine. Knows accounts, entries and invariants; knows nothing about PSPs, HTTP or files.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "migrations"],
+  "scripts": {
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@recon/canon": "0.0.0",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.5",
+    "fast-check": "^4.3.0"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@recon/canon",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The canonical domain language. Types only. Depends on nothing.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build"
+  }
+}

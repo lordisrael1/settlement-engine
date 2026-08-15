@@ -1,0 +1,58 @@
+{
+  "status": "success",
+  "message": "Settlements fetched",
+  "meta": { "page_info": { "total": 3, "current_page": 1, "total_pages": 1 } },
+  "data": [
+    {
+      "id": "stm_7QpLd2Rk9x",
+      "net_amount": 11832,
+      "gross_amount": 12000,
+      "currency": "NGN",
+      "meta": {},
+      "status": "completed",
+      "due_datetime": "2026-08-14T09:00:00.000Z",
+      "transaction_datetime": "2026-08-13T14:22:10.000Z",
+      "fees": [
+        { "type": "stamp_duty", "amount": 0 },
+        { "type": "charge_fee", "amount": 168 }
+      ],
+      "destination": "bank",
+      "charge_count": "3",
+      "created_datetime": "2026-08-14T09:00:00.000Z"
+    },
+    {
+      "id": "stm_Bn4TzWq8Mv",
+      "net_amount": 4880,
+      "gross_amount": 5000,
+      "currency": "NGN",
+      "meta": {},
+      "status": "completed",
+      "due_datetime": "2026-08-14T09:00:00.000Z",
+      "transaction_datetime": "2026-08-13T16:05:47.000Z",
+      "fees": [
+        { "type": "stamp_duty", "amount": 0 },
+        { "type": "charge_fee", "amount": 70 }
+      ],
+      "chargeback": 50,
+      "destination": "bank",
+      "charge_count": "1",
+      "created_datetime": "2026-08-14T09:00:00.000Z"
+    },
+    {
+      "id": "stm_YQkhQsAZnQ",
+      "net_amount": 150,
+      "gross_amount": 150,
+      "currency": "USD",
+      "meta": {},
+      "status": "completed",
+      "due_datetime": "2026-08-14T11:00:00.000Z",
+      "fees": [
+        { "type": "stamp_duty", "amount": 0 },
+        { "type": "charge_fee", "amount": 0 }
+      ],
+      "destination": "wallet",
+      "charge_count": "1",
+      "created_datetime": "2026-08-14T11:00:00.000Z"
+    }
+  ]
+}
