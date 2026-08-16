@@ -13,8 +13,8 @@
       "due_datetime": "2026-08-14T09:00:00.000Z",
       "transaction_datetime": "2026-08-13T14:22:10.000Z",
       "fees": [
-        { "type": "stamp_duty", "amount": 0 },
-        { "type": "charge_fee", "amount": 168 }
+        { "type": "stamp_duty", "amount": 50 },
+        { "type": "charge_fee", "amount": 118 }
       ],
       "destination": "bank",
       "charge_count": "3",

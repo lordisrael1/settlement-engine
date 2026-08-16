@@ -1,10 +1,17 @@
 import type { ParseResult, StandardizedTransaction } from '@pay-normalize/core';
 
-import type { SettlementLine, SettlementStatus, SourceId } from '@recon/canon';
+import type {
+  Evidence,
+  Payout,
+  SettlementAdjustment,
+  SettlementLine,
+  SettlementStatus,
+  SourceId,
+} from '@recon/canon';
 import { idempotencyKey } from '@recon/canon';
 
 import { toMoney } from '../kobo.js';
-import type { RejectedRow, SettlementIngestResult } from './types.js';
+import type { RejectedRow, SettlementContext, SettlementIngestResult } from './types.js';
 
 /**
  * Money that has already moved, in the sources' vocabulary.
@@ -13,10 +20,6 @@ import type { RejectedRow, SettlementIngestResult } from './types.js';
  * money — it is a statement of intent — and admitting it would let the ledger book cash
  * that never landed. Those rows are rejected as `not-a-settlement`, and the source will
  * report them again with a terminal status when they resolve.
- *
- * `chargeback` has no counterpart upstream: no connector reports a chargeback as a
- * status. It arrives folded into a settlement's deductions, so a chargeback becomes a
- * reason-coded observation for the reconciler rather than a line status here.
  */
 const SETTLED_STATUSES: Readonly<Record<string, SettlementStatus>> = {
   SUCCESSFUL: 'settled',
@@ -37,6 +40,9 @@ export type Normalized =
  */
 export function toSettlementLine(
   txn: StandardizedTransaction,
+  context: SettlementContext,
+  evidenceId: string,
+  payoutReference: string | null,
   hints: readonly string[] = [],
 ): Normalized {
   const raw = txn.rawProviderPayload;
@@ -58,30 +64,92 @@ export function toSettlementLine(
     line: {
       reference: txn.providerReference,
       source: txn.provider,
+      payoutReference,
+      merchantId: context.merchantId,
       gross: toMoney(txn.amountInKobo),
       fee: toMoney(txn.feeInKobo),
       net: toMoney(txn.netAmountInKobo),
       status,
       settledAt: txn.settlementDate,
       reasonHints: [`channel:${txn.channel}`, ...hints],
+      evidenceId,
       idempotencyKey: idempotencyKey('settlement', txn.dedupeKey),
     },
   };
 }
 
 /**
- * Fold a connector's row results into one canonical ingest result.
+ * Map one normalised provider settlement onto a canonical payout.
  *
- * `hintsFor` lets an adapter surface facts that only it can see in the raw payload —
- * a chargeback folded into a fee, say. That is legitimate source-specific knowledge and
- * it belongs here, inside the boundary, expressed as data that travels with the line.
+ * `expectedNet` is taken from the provider verbatim rather than recomputed from the
+ * adjustments. Recomputing it and trusting our own answer would hide exactly the
+ * disagreement that matters — a report whose declared net does not equal its own itemised
+ * deductions has something in it nobody has told us about, and `payoutArithmetic` in
+ * `@recon/canon` exists to surface that rather than paper over it.
+ */
+export function toPayout(
+  txn: StandardizedTransaction,
+  adjustments: readonly SettlementAdjustment[],
+  evidenceId: string,
+): { ok: true; payout: Payout } | { ok: false; rejected: RejectedRow } {
+  const raw = txn.rawProviderPayload;
+
+  if (txn.currency !== 'NGN') {
+    return {
+      ok: false,
+      rejected: {
+        kind: 'not-a-settlement',
+        reason: `currency ${txn.currency} — this ledger keeps books in NGN only`,
+        raw,
+      },
+    };
+  }
+  if (!SETTLED_STATUSES[txn.status]) {
+    return {
+      ok: false,
+      rejected: {
+        kind: 'not-a-settlement',
+        reason: `status ${txn.status} — the payout has not been reported as sent`,
+        raw,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    payout: {
+      payoutReference: txn.providerReference,
+      source: txn.provider,
+      // Reported, never confirmed. Only a bank statement can move it on.
+      status: 'reported',
+      gross: toMoney(txn.amountInKobo),
+      expectedNet: toMoney(txn.netAmountInKobo),
+      adjustments,
+      reportedAt: txn.occurredAt,
+      valueDate: txn.settlementDate,
+      evidenceId,
+      idempotencyKey: idempotencyKey('payout', txn.dedupeKey),
+    },
+  };
+}
+
+/**
+ * Fold a connector's row results into canonical records.
+ *
+ * `interpret` is the adapter's one hook into the raw payload — the place a source's own
+ * knowledge is turned into typed canonical data. That is legitimate source-specific
+ * knowledge and it belongs here, inside the boundary, expressed as structure that travels
+ * with the record rather than as narration a downstream reader would have to parse.
  */
 export function fromParseResults(
   source: SourceId,
   format: string,
+  evidence: Evidence,
   rows: readonly ParseResult[],
-  hintsFor: (txn: StandardizedTransaction) => readonly string[] = () => [],
+  interpret: (txn: StandardizedTransaction) => RowInterpretation,
+  context: SettlementContext,
 ): SettlementIngestResult {
+  const payouts: Payout[] = [];
   const lines: SettlementLine[] = [];
   const rejected: RejectedRow[] = [];
 
@@ -99,13 +167,43 @@ export function fromParseResults(
       continue;
     }
 
-    const normalized = toSettlementLine(row.transaction, hintsFor(row.transaction));
+    const interpretation = interpret(row.transaction);
+
+    if (interpretation.as === 'payout') {
+      const result = toPayout(row.transaction, interpretation.adjustments, evidence.evidenceId);
+      if (result.ok) payouts.push(result.payout);
+      else rejected.push(result.rejected);
+      continue;
+    }
+
+    const normalized = toSettlementLine(
+      row.transaction,
+      context,
+      evidence.evidenceId,
+      interpretation.payoutReference,
+      interpretation.hints,
+    );
     if (normalized.ok) lines.push(normalized.line);
     else rejected.push(normalized.rejected);
   }
 
-  return { source, format, lines, rejected };
+  return { source, format, evidence, payouts, lines, rejected };
 }
+
+/**
+ * What the adapter decided a row is.
+ *
+ * A source reports either the movement or the payments inside it, and which one it is
+ * changes everything downstream — so the adapter says so explicitly rather than leaving
+ * the matcher to infer it from which fields happen to be populated.
+ */
+export type RowInterpretation =
+  | { readonly as: 'payout'; readonly adjustments: readonly SettlementAdjustment[] }
+  | {
+      readonly as: 'line';
+      readonly payoutReference: string | null;
+      readonly hints: readonly string[];
+    };
 
 /** Bytes to JSON, with a malformed-row result instead of a thrown exception. */
 export function parseJson(payload: Buffer): { ok: true; value: unknown } | { ok: false; rejected: RejectedRow } {

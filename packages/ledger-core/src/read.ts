@@ -1,4 +1,11 @@
-import type { AccountId, LedgerTransaction, TransactionId, TransactionState } from '@recon/canon';
+import type {
+  AccountId,
+  LedgerTransaction,
+  Reference,
+  SourceId,
+  TransactionId,
+  TransactionState,
+} from '@recon/canon';
 import { money } from '@recon/canon';
 
 import type { Executor } from './pool.js';
@@ -82,6 +89,42 @@ export async function listByState(
 
   return headers.rows.map((row) =>
     toTransaction(row, byTransaction.get(row.transaction_id) ?? []),
+  );
+}
+
+/**
+ * Transactions carrying a given source reference, in any state.
+ *
+ * More than one is normal and not an error: a promise, the settlement that discharged it
+ * and a later clawback all describe the same reference. Deciding which of them a new
+ * record belongs to is the reconciler's job, so this returns them all rather than guessing.
+ */
+export async function listByReference(
+  db: Executor,
+  source: SourceId,
+  reference: Reference,
+): Promise<LedgerTransaction[]> {
+  const headers = await db.query<TransactionRow>(
+    `SELECT t.transaction_id, t.source, t.reference, t.occurred_at, t.recorded_at, s.state
+       FROM ledger_transactions t
+       JOIN transaction_states s ON s.transaction_id = t.transaction_id
+      WHERE t.source = $1 AND t.reference = $2
+      ORDER BY t.occurred_at, t.transaction_id`,
+    [source, reference],
+  );
+  if (headers.rows.length === 0) return [];
+
+  const entries = await db.query<EntryRow>(
+    `SELECT entry_id, transaction_id, account_id, amount_kobo::text, currency, ordinal
+       FROM entries WHERE transaction_id = ANY($1) ORDER BY transaction_id, ordinal`,
+    [headers.rows.map((row) => row.transaction_id)],
+  );
+
+  return headers.rows.map((row) =>
+    toTransaction(
+      row,
+      entries.rows.filter((entry) => entry.transaction_id === row.transaction_id),
+    ),
   );
 }
 

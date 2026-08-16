@@ -1,7 +1,9 @@
-import type { SettlementLine, SourceId } from '@recon/canon';
+import type { Evidence, Payout, SettlementLine, SourceId } from '@recon/canon';
+
+import type { EvidenceContext } from '../evidence.js';
 
 /**
- * A row that will not become a `SettlementLine`, and why.
+ * A row that will not become a canonical record, and why.
  *
  * Rejection is row-isolated on purpose: one mangled row in a five-thousand-row export
  * must not cost us the other four thousand nine hundred and ninety-nine. All-or-nothing
@@ -22,10 +24,26 @@ export interface RejectedRow {
   readonly raw: unknown;
 }
 
+/**
+ * What a settlement export yields — and note that it is two different things.
+ *
+ * Sources fall into two camps, and flattening them would lose the distinction that makes
+ * matching tractable. Some report **payouts**: one money movement, with its own reference
+ * and its own itemised deductions, covering a number of charges it does not enumerate.
+ * Others report **transactions**: individual settled payments, with no statement of which
+ * movement carries them.
+ *
+ * A payout is strictly better information — the PSP has told us the grouping, so the
+ * arithmetic only has to confirm it rather than discover it. Where we only get lines, the
+ * grouping has to be inferred, and inference is what subset-sum is for.
+ */
 export interface SettlementIngestResult {
   readonly source: SourceId;
   /** Which fixture-tested foreign shape was recognised, e.g. `flutterwave-settlements-api-v4`. */
   readonly format: string;
+  /** The bytes this came from, hashed and attributed. */
+  readonly evidence: Evidence;
+  readonly payouts: readonly Payout[];
   readonly lines: readonly SettlementLine[];
   readonly rejected: readonly RejectedRow[];
 }
@@ -33,15 +51,26 @@ export interface SettlementIngestResult {
 /**
  * One adapter per settlement source. The whole variety of the outside world — JSON
  * envelopes, row arrays, and whatever the next source speaks — is contained behind this
- * one method, so that everything downstream sees `SettlementLine[]` and cannot tell the
+ * one method, so that everything downstream sees canonical records and cannot tell the
  * difference (Law 7).
  *
- * Deliberately synchronous and pure: bytes in, canonical events out. No network, no
- * clock, no database. Fetching the bytes is the caller's business, and deduplicating the
- * result is a separate step, because dedupe needs state and an adapter must not have any.
+ * Deliberately synchronous and pure: bytes in, canonical events out. No network, no clock,
+ * no database. Fetching the bytes is the caller's business, and deduplicating the result
+ * is a separate step, because dedupe needs state and an adapter must not have any.
  */
 export interface SettlementSource {
   readonly source: SourceId;
   readonly format: string;
-  ingest(payload: Buffer): SettlementIngestResult;
+  /** Bumped whenever the parsing changes. Recorded with every record it produces. */
+  readonly parserVersion: string;
+  ingest(payload: Buffer, context: SettlementContext): SettlementIngestResult;
+}
+
+/**
+ * What the adapter cannot know from the bytes alone: whose money this is, and who handed
+ * us the file. Both are needed before a single record can be attributed or a fee contract
+ * chosen, and neither is ever inside a PSP's export.
+ */
+export interface SettlementContext extends Omit<EvidenceContext, 'kind' | 'source'> {
+  readonly merchantId: string;
 }

@@ -18,8 +18,13 @@ domain vocabulary without reading any other code. Read the files in this order:
 | [`identifiers.ts`](src/identifiers.ts) | How events are named and deduplicated | Law 4 |
 | [`ledger.ts`](src/ledger.ts) | The double-entry record: entries, transactions, lifecycle | Laws 1, 2 |
 | [`payment.ts`](src/payment.ts) | The **promise** — fast information from a webhook | Law 5 |
+| [`matching.ts`](src/matching.ts) | What reconciliation concluded, and why | — |
 | [`settlement.ts`](src/settlement.ts) | The **money** — slow cash, and each source's settlement window | — |
-| [`matching.ts`](src/matching.ts) | What reconciliation concluded, and why — the reason codes | — |
+
+`PaymentStatus` and `STATUS_RANK` are spelled exactly as `@pay-normalize/core` spells them.
+That is deliberate: it is the webhook half of our ingest layer, and a mapping table between
+two names for one concept is a thing that can drift. See
+[DECISIONS.md § D-013](../../docs/DECISIONS.md).
 
 ## The two shapes the whole system exists to compare
 

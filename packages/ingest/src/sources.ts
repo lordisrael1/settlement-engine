@@ -4,9 +4,20 @@ import { monnify } from '@pay-normalize/monnify';
 import { nomba } from '@pay-normalize/nomba';
 import { paystack } from '@pay-normalize/paystack';
 
-import type { SettlementWindow, SourceId } from '@recon/canon';
+import type { BusinessCalendar, FeeContract, MerchantId, SourceId } from '@recon/canon';
 
-import { feeModel, type FeeModel } from './fees.js';
+import {
+  CUT_OFF_5PM_WAT,
+  ONE_DAY_GRACE,
+  FOUR_HOURS_GRACE,
+  calendar,
+} from './calendar.js';
+import {
+  FLUTTERWAVE_PUBLISHED_NGN,
+  MONNIFY_PUBLISHED_NGN,
+  PAYSTACK_PUBLISHED_NGN,
+  publishedContract,
+} from './fees.js';
 import {
   flutterwaveSettlements,
   monnifySettlements,
@@ -17,14 +28,13 @@ import type { SettlementSource } from './settlement/types.js';
 /**
  * Everything the system knows about one payment source, in one place.
  *
- * This is how Law 7 survives contact with reality. Sources genuinely do differ — they
- * settle on different schedules and charge different fees — and pretending otherwise
- * would just push the difference somewhere less visible. So the difference is captured
- * *as data*, here, at the boundary. Downstream code asks a profile what the window is;
- * it never asks which source this is.
+ * This is how Law 7 survives contact with reality. Sources genuinely do differ — they cut
+ * off at different times, settle on different schedules, and charge different rates — and
+ * pretending otherwise would just push the difference somewhere less visible. So the
+ * difference is captured *as data*, here, at the boundary. Downstream code asks a profile
+ * when money is due; it never asks which source this is.
  *
- * Adding a source is one entry in this table plus its connector. Nothing else in the
- * system changes.
+ * Adding a source is one entry in this table plus its connector. Nothing else changes.
  */
 export interface SourceProfile {
   readonly id: SourceId;
@@ -32,49 +42,46 @@ export interface SourceProfile {
   readonly connector: Connector;
   /** The money half. `null` when no fixture-verified settlement format exists yet. */
   readonly settlement: SettlementSource | null;
-  readonly settlementWindow: SettlementWindow;
-  /** `null` when the rate card is not known — see the note on Nomba below. */
-  readonly expectedFee: FeeModel | null;
+  /** When money is actually late, in business days and cut-off times. */
+  readonly calendar: BusinessCalendar;
+  /**
+   * Strings this source's payouts tend to carry in a bank narration.
+   *
+   * Bank narration is the only thing linking a credit to a payout for most Nigerian banks,
+   * and it is truncated, inconsistent and occasionally absent. These are *hints for
+   * extraction*, kept as data so that the guessing is visible and per-source rather than
+   * hidden in a regex somewhere downstream. A credit whose narration matches nothing is
+   * matched on amount and date instead, at lower confidence — never by a parser deciding.
+   */
+  readonly narrationMarkers: readonly string[];
 }
 
 /**
- * T+1 channels get a T+2 deadline, not a T+1 one.
- *
- * The window is the point at which silence becomes an *exception* a human is woken for,
- * not the point at which money is expected. Setting it to the expected arrival time
- * would make every ordinary weekend and public holiday an incident, and an alert that
- * cries wolf is worse than no alert.
+ * Card and PSP-aggregated rails are T+1 with a 5pm cut-off and a full day of grace: a
+ * Friday-evening payment is not late until Tuesday, and saying otherwise turns every
+ * weekend into an incident.
  */
-const T_PLUS_2: SettlementWindow = { deadlineMinutes: 2 * 24 * 60 };
-const T_PLUS_1: SettlementWindow = { deadlineMinutes: 24 * 60 };
+const T_PLUS_1 = calendar({
+  cutOffMinutesUtc: CUT_OFF_5PM_WAT,
+  settlementBusinessDays: 1,
+  graceMinutes: ONE_DAY_GRACE,
+});
+
+/** Rails that quote T+2, with the same cut-off and the same tolerance. */
+const T_PLUS_2 = calendar({
+  cutOffMinutesUtc: CUT_OFF_5PM_WAT,
+  settlementBusinessDays: 2,
+  graceMinutes: ONE_DAY_GRACE,
+});
 
 /**
- * Published NGN rate cards, as of the last review.
- *
- * These are *expectations* used to explain differences, so being slightly stale
- * degrades gracefully — a changed rate shows up as a rising `FEE_VARIANCE` count rather
- * than as a wrong balance, because the fee actually charged always wins. Review them
- * against your own signed rate card; a negotiated rate is common above modest volume.
+ * Near-instant rails — NIP transfers, virtual-account credits — settle the same business
+ * day, and unmatched money there is suspicious within hours rather than days.
  */
-const PAYSTACK_NGN = feeModel({
-  percentBasisPoints: 150,
-  flatKobo: 10_000n, // ₦100
-  flatWaivedBelowKobo: 250_000n, // waived under ₦2,500
-  capKobo: 200_000n, // capped at ₦2,000
-});
-
-const FLUTTERWAVE_NGN = feeModel({
-  percentBasisPoints: 140,
-  flatKobo: 0n,
-  flatWaivedBelowKobo: null,
-  capKobo: 200_000n,
-});
-
-const MONNIFY_NGN = feeModel({
-  percentBasisPoints: 150,
-  flatKobo: 0n,
-  flatWaivedBelowKobo: null,
-  capKobo: 200_000n,
+const SAME_DAY = calendar({
+  cutOffMinutesUtc: CUT_OFF_5PM_WAT,
+  settlementBusinessDays: 0,
+  graceMinutes: FOUR_HOURS_GRACE,
 });
 
 const PROFILES: readonly SourceProfile[] = [
@@ -86,33 +93,29 @@ const PROFILES: readonly SourceProfile[] = [
     // right and is wrong, which is worse than not having one — so this stays null until
     // a real export exists. The promise half works fully in the meantime.
     settlement: null,
-    settlementWindow: T_PLUS_2,
-    expectedFee: PAYSTACK_NGN,
+    calendar: T_PLUS_2,
+    narrationMarkers: ['PAYSTACK', 'PSTK'],
   },
   {
     id: flutterwave.provider,
     connector: flutterwave,
     settlement: flutterwaveSettlements,
-    settlementWindow: T_PLUS_2,
-    expectedFee: FLUTTERWAVE_NGN,
+    calendar: T_PLUS_2,
+    narrationMarkers: ['FLUTTERWAVE', 'FLW', 'RAVE'],
   },
   {
     id: nomba.provider,
     connector: nomba,
     settlement: nombaSettlements,
-    settlementWindow: T_PLUS_1,
-    // Nomba prices per merchant rather than from a public card, so there is no rate
-    // card to encode. `null` is the honest value: the reconciler will match these on
-    // reference and exact amount, and report a fee it cannot predict rather than
-    // pretending to predict one.
-    expectedFee: null,
+    calendar: T_PLUS_1,
+    narrationMarkers: ['NOMBA'],
   },
   {
     id: monnify.provider,
     connector: monnify,
     settlement: monnifySettlements,
-    settlementWindow: T_PLUS_1,
-    expectedFee: MONNIFY_NGN,
+    calendar: SAME_DAY,
+    narrationMarkers: ['MONNIFY', 'MFY'],
   },
 ];
 
@@ -136,4 +139,25 @@ export function sourceProfile(source: SourceId): SourceProfile {
   const profile = SOURCES.get(source);
   if (!profile) throw new UnknownSourceError(source);
   return profile;
+}
+
+/**
+ * The published rate cards, as contracts, for one merchant.
+ *
+ * A deployment that has loaded its own signed agreements does not call this — it reads
+ * contracts from the database, where they carry real effective dates and a real approver.
+ * This exists so that a deployment which has not is working from list prices *explicitly*,
+ * rather than from a constant buried in the matcher.
+ *
+ * Nomba is absent on purpose. It prices per merchant with no public card, so there is
+ * nothing honest to seed: the matcher will match its payments on amount and report the fee
+ * it observed, rather than generating a permanent stream of variances against a rate
+ * nobody ever quoted (D-026).
+ */
+export function publishedContracts(merchantId: MerchantId): FeeContract[] {
+  return [
+    publishedContract(paystack.provider, merchantId, PAYSTACK_PUBLISHED_NGN),
+    publishedContract(flutterwave.provider, merchantId, FLUTTERWAVE_PUBLISHED_NGN),
+    publishedContract(monnify.provider, merchantId, MONNIFY_PUBLISHED_NGN),
+  ];
 }

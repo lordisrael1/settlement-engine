@@ -8,6 +8,23 @@
 export type AccountType = 'asset' | 'income' | 'expense' | 'contra_income' | 'holding';
 
 /**
+ * Two accounts carry a payment's whole life, and the gap between them is the system.
+ *
+ *   psp_receivable   a customer paid; the PSP owes us and has not yet handed it over
+ *   bank_account     our own bank says the cash is here
+ *
+ * Nothing moves between them on a PSP's say-so. A settlement report is the PSP's claim
+ * about its own future behaviour, and it is recorded in the reconciliation tables — as a
+ * `Payout` with status `reported` — where it can be matched, explained and chased without
+ * ever pretending to be money. **Only a bank statement moves `bank_account`.**
+ *
+ * The deductions below exist so that the difference between what we were owed and what
+ * arrived is always a named thing rather than a residue. A payout short by ₦4,200 is not
+ * a mystery to be absorbed into fees: it is a reserve, or a tax, or a penalty, and those
+ * are three different facts with three different futures.
+ */
+
+/**
  * The direction an account normally moves.
  * `1` is debit-natural (value in is positive), `-1` is credit-natural.
  *
@@ -27,7 +44,31 @@ export const CHART_OF_ACCOUNTS = {
     id: 'bank_account',
     type: 'asset',
     naturalSign: 1,
-    meaning: 'Real settled cash in our corporate account',
+    meaning: 'Real settled cash in our corporate account, confirmed by a bank statement',
+  },
+  psp_reserve: {
+    id: 'psp_reserve',
+    type: 'asset',
+    naturalSign: 1,
+    meaning: 'Rolling reserve or dispute hold withheld by the PSP — still owed, just later',
+  },
+  taxes_withheld: {
+    id: 'taxes_withheld',
+    type: 'expense',
+    naturalSign: 1,
+    meaning: 'VAT, stamp duty or withholding tax deducted at source by the PSP',
+  },
+  penalties: {
+    id: 'penalties',
+    type: 'expense',
+    naturalSign: 1,
+    meaning: 'Fines and penalties a PSP or bank deducted from a payout',
+  },
+  bank_charges: {
+    id: 'bank_charges',
+    type: 'expense',
+    naturalSign: 1,
+    meaning: 'Charges the bank levied on a credit, invisible to the PSP',
   },
   merchant_revenue: {
     id: 'merchant_revenue',

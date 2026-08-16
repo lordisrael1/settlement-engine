@@ -1,53 +1,69 @@
-import type { Money } from '@recon/canon';
-import { money } from '@recon/canon';
+import type { FeeContract, MerchantId, RateCard, SourceId } from '@recon/canon';
 
 /**
- * What a source is expected to charge on a given gross amount.
+ * Published NGN rate cards, expressed as *contracts with dates on them*.
  *
- * This is the function that turns a raw-number "mismatch" into a match: the reconciler
- * matches on `ourGross − expectedFee(ourGross) == theirNet`, not on the amounts
- * themselves. Modelling each rate card correctly is a large share of the real value of
- * the whole system.
+ * These are the public list prices, and they are seeds — the honest starting point for a
+ * deployment that has not yet loaded its own signed agreements. Any merchant above modest
+ * volume is on a negotiated rate, and the whole reason contracts carry `effectiveFrom` and
+ * `approvedBy` is so that the negotiated one can replace the published one without
+ * rewriting history: March reconciles at March's rate, forever.
  *
- * It is an *expectation*, never an authority. When the fee actually charged differs, the
- * settlement line's fee is the truth and the difference is booked as `FEE_VARIANCE` —
- * the model exists to explain differences, not to overrule the money.
+ * A stale card degrades gracefully. The fee actually charged always wins; a wrong
+ * expectation shows up as a rising `FEE_VARIANCE` count, never as a wrong balance.
+ *
+ * VAT is 7.5% on the fee, and it is modelled separately because it books to
+ * `taxes_withheld` rather than `fees_expense`. It goes to the tax authority, not the PSP,
+ * and folding it into "what Paystack costs" makes the PSP look 7.5% more expensive than it
+ * is while hiding a tax line the accountants need.
  */
-export type FeeModel = (gross: Money) => Money;
+const VAT_NGN = 750;
 
-export interface RateCard {
-  /** 150 = 1.50%. Basis points keep the arithmetic in integers. */
-  readonly percentBasisPoints: number;
-  /** Flat component added on top of the percentage. */
-  readonly flatKobo: bigint;
-  /** Gross below which the flat component is waived. `null` means never waived. */
-  readonly flatWaivedBelowKobo: bigint | null;
-  /** Maximum total fee. `null` means uncapped. */
-  readonly capKobo: bigint | null;
-}
+export const PAYSTACK_PUBLISHED_NGN: RateCard = {
+  percentBasisPoints: 150,
+  flatKobo: 10_000n, // ₦100
+  flatWaivedBelowKobo: 250_000n, // waived under ₦2,500
+  capKobo: 200_000n, // capped at ₦2,000
+  vatBasisPoints: VAT_NGN,
+};
+
+export const FLUTTERWAVE_PUBLISHED_NGN: RateCard = {
+  percentBasisPoints: 140,
+  flatKobo: 0n,
+  flatWaivedBelowKobo: null,
+  capKobo: 200_000n,
+  vatBasisPoints: VAT_NGN,
+};
+
+export const MONNIFY_PUBLISHED_NGN: RateCard = {
+  percentBasisPoints: 150,
+  flatKobo: 0n,
+  flatWaivedBelowKobo: null,
+  capKobo: 200_000n,
+  vatBasisPoints: VAT_NGN,
+};
 
 /**
- * Build a fee model from a rate card.
+ * The published card, as a contract effective from the beginning of time and never
+ * approved by anybody.
  *
- * All arithmetic is `bigint`, and the percentage rounds half-up at the kobo — the same
- * discipline as the ledger itself. A fee model that rounded through a float would
- * manufacture the very one-kobo discrepancies the reconciler exists to eliminate.
+ * `approvedBy` says `published-rate-card` rather than a person's name, deliberately: it is
+ * a list price we read, not an agreement anyone signed, and the exception queue should be
+ * able to tell the difference when a variance shows up.
  */
-export function feeModel(card: RateCard): FeeModel {
-  return (gross: Money): Money => {
-    const basis = gross.kobo < 0n ? -gross.kobo : gross.kobo;
-
-    // Round half-up: (x * bp + 5000) / 10000, in integer arithmetic.
-    const percentage =
-      (basis * BigInt(card.percentBasisPoints) + 5_000n) / 10_000n;
-
-    const flatApplies =
-      card.flatWaivedBelowKobo === null || basis >= card.flatWaivedBelowKobo;
-    const uncapped = percentage + (flatApplies ? card.flatKobo : 0n);
-
-    const total =
-      card.capKobo !== null && uncapped > card.capKobo ? card.capKobo : uncapped;
-
-    return money(total, gross.currency);
+export function publishedContract(
+  source: SourceId,
+  merchantId: MerchantId,
+  rateCard: RateCard,
+): FeeContract {
+  return {
+    contractId: `published:${source}:${merchantId}`,
+    source,
+    merchantId,
+    effectiveFrom: new Date(0),
+    effectiveTo: null,
+    rateCard,
+    approvedBy: 'published-rate-card',
+    approvedAt: new Date(0),
   };
 }

@@ -1,0 +1,18 @@
+[
+  {
+    "id": "GTB-2026-081501",
+    "date": "2026-08-14T11:20:00Z",
+    "amount": "11832.00",
+    "type": "credit",
+    "narration": "TRF/FLUTTERWAVE SETTLEMENT stm_7QpLd2Rk9x/NGN",
+    "balance": "11832.00"
+  },
+  {
+    "id": "GTB-2026-081502",
+    "date": "2026-08-14T11:22:00Z",
+    "amount": "3500.00",
+    "type": "debit",
+    "narration": "COMMISSION ON TURNOVER Q3",
+    "balance": "8332.00"
+  }
+]

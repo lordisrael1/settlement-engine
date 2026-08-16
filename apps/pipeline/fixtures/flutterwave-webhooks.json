@@ -1,0 +1,58 @@
+[
+  {
+    "type": "charge.completed",
+    "webhook_id": "wbk_3nQ8rTdY1a",
+    "timestamp": 1755079200000,
+    "data": {
+      "id": "chg_Kd82nWq0Lp",
+      "amount": 5500,
+      "currency": "NGN",
+      "status": "succeeded",
+      "reference": "ORD-4417",
+      "created_datetime": "2026-08-13T10:00:00.000Z",
+      "payment_method": { "type": "card" }
+    }
+  },
+  {
+    "type": "charge.completed",
+    "webhook_id": "wbk_9wLp2Xs4bT",
+    "timestamp": 1755088200000,
+    "data": {
+      "id": "chg_Rz41mVt7Cx",
+      "amount": 4000,
+      "currency": "NGN",
+      "status": "succeeded",
+      "reference": "ORD-4418",
+      "created_datetime": "2026-08-13T12:30:00.000Z",
+      "payment_method": { "type": "bank_transfer" }
+    }
+  },
+  {
+    "type": "charge.completed",
+    "webhook_id": "wbk_5tHj7Nm3vE",
+    "timestamp": 1755099900000,
+    "data": {
+      "id": "chg_Yb63pQd5Ju",
+      "amount": 2500,
+      "currency": "NGN",
+      "status": "succeeded",
+      "reference": "ORD-4419",
+      "created_datetime": "2026-08-13T15:45:00.000Z",
+      "payment_method": { "type": "card" }
+    }
+  },
+  {
+    "type": "charge.completed",
+    "webhook_id": "wbk_1cVn6Kw8sR",
+    "timestamp": 1755101147000,
+    "data": {
+      "id": "chg_Ta97xLe2Hn",
+      "amount": 5000,
+      "currency": "NGN",
+      "status": "succeeded",
+      "reference": "ORD-4420",
+      "created_datetime": "2026-08-13T16:05:47.000Z",
+      "payment_method": { "type": "card" }
+    }
+  }
+]

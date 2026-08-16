@@ -1,8 +1,13 @@
 # apps/api — Phase 6 (not yet built)
 
-**The one thing that actually runs.** Everything under `packages/` is a library that cannot
-run by itself. This is the deployable: a long-lived Fastify process that binds a port,
-accepts HTTP, receives webhooks, and wires the libraries together.
+**The long-lived service.** A Fastify process that binds a port, accepts HTTP, receives
+webhooks, and wires the libraries together.
+
+> A deployable already exists: [`apps/pipeline`](../pipeline), a CLI over the same
+> libraries, built because containerisation was brought forward and a container needs a
+> program to run. This service **joins** it rather than replacing it — one set of
+> libraries, two ways to run them. The Dockerfile changes by one line, and nothing under
+> `packages/` changes at all. See [DECISIONS.md § D-022](../../docs/DECISIONS.md).
 
 **Depends on:** all four packages. **Depended on by:** nothing. That shape — depends on
 everything, depended on by nothing — is the signature of a deployable, and it is exactly why

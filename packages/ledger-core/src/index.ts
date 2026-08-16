@@ -25,14 +25,25 @@ export {
   type PostTransactionResult,
 } from './post.js';
 export { reverse, reversalTransactionId } from './reverse.js';
-export { bookAuthorizedPayment, UnbookablePaymentError } from './bookings.js';
+export {
+  bookAuthorizedPayment,
+  bookBankConfirmedSettlement,
+  bookReversal,
+  bookChargeback,
+  bookReturnedPayout,
+  UnbookablePaymentError,
+  ImplausibleSettlementError,
+  type BankConfirmation,
+  type BookingEvent,
+  type DischargedPromise,
+} from './bookings.js';
 export {
   currentState,
   transition,
   type TransitionInput,
   type TransitionResult,
 } from './state.js';
-export { getTransaction, listByState } from './read.js';
+export { getTransaction, listByState, listByReference } from './read.js';
 
 export {
   balance,

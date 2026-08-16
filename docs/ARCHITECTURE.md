@@ -74,12 +74,17 @@ four signature schemes, CSVs, JSON, fixed-width bank files. That variety must be
 at the edge and converted, once, into `canon` types, so the core never sees a foreign shape
 (Law 7 again, this time as behaviour).
 
-**What it is.** The two-halves ingest layer from Phase 2. The **webhook half** is
-`pay-normalize` doing its job — signature-verify, normalise to `CanonicalPayment`, dedupe,
-feed the promise side. The **settlement half** is the new work: the `SettlementSource`
-interface and per-source adapters (`PaystackSettlementAdapter`, etc.), each running
-*parse → validate → normalize → dedupe* to emit `SettlementLine[]`, plus each source's fee
-model and settlement window.
+**What it is.** The two-halves ingest layer from Phase 2, and it is *thin*. The bible
+assumed the settlement half would be entirely new work; reading `@pay-normalize/core`
+showed its `Connector` interface already includes `parseSettlementFile`, and that
+Flutterwave, Nomba and Monnify ship working parsers. So both halves stand on the library:
+signature verification, kobo conversion, timezone rules, status ordering and row-isolated
+parsing are all upstream.
+
+What this package genuinely adds is the last translation into our language, and the two
+facts a deliberately stateless normalisation library will never have: **an expected
+settlement window** and **an expected fee**, declared per source as data. Those two are
+what reconciliation actually runs on. See [DECISIONS.md § D-012](DECISIONS.md).
 
 **Its place in the graph.** Depends on `canon` (its output language) and on `pay-normalize`.
 Notably it does **not** depend on `ledger-core` — ingest's job ends when it has produced a
@@ -94,14 +99,25 @@ every divergence must be either automatically explained or escalated. That match
 the tiered pipeline, the fee-aware and batch matching, the timing-aware deferral, the
 exception state machine — is its own distinct concern and deserves its own home.
 
-**What it is.** Phases 3 and 4: takes authorized ledger transactions and ingested
-`SettlementLine`s, partitions them into matched / explained / unexplained, and — crucially —
-**writes new ledger transactions through `ledger-core`** when it confirms a settlement,
-booking the payout and the fee. So it is where reconciliation feeds back into the ledger.
+**What it is.** Phases 3 and 4, in **two stages**, because money moves in two steps.
+`allocate()` matches authorized ledger transactions to the payouts a PSP says it is sending,
+names every deduction, and **books nothing** — a settlement report is a claim by an
+interested party, not cash. `confirm()` matches an independent bank credit to that payout,
+and is the only thing in the system that **writes a ledger transaction through
+`ledger-core`**: cash to `bank_account`, each named deduction to its own account, and the
+receivable closed. So it is where reconciliation feeds back into the ledger — but only on
+the evidence that justifies it.
 
 **Its place in the graph.** Depends on `canon` (the language) and `ledger-core` (to post the
-settlement/fee transactions it discovers), and reads the ingest output. It is pure domain
-logic — deterministic, no HTTP. Imported by `api`, which triggers reconciliation runs.
+transactions it discovers), and reads the ingest output. It is pure domain logic —
+deterministic, no HTTP. Imported by `api`, which triggers reconciliation runs.
+
+**The edge that is deliberately absent** is `reconciler → ingest`. The matcher needs to know
+each source's business calendar and fee contracts, and it would be easy to let it look them
+up. It must not: the moment it can reach a source table, it can branch on a source name
+(Law 7). Instead both arrive as a `SourcePolicy` handed in, and the *deployable* joins
+ingest's calendars to the contracts in the database. That is what `apps/pipeline/src/policy.ts`
+is, and it is the whole of it — the conductor wiring two sections together, owning no logic.
 
 ## `apps/api` — the one thing that actually runs
 
@@ -125,33 +141,47 @@ of a deployable — and it is exactly why the app, and only the app, is what you
 
 ---
 
+## `apps/pipeline` — the deployable that exists today
+
+Phase 6's Fastify service is not built yet, and Phase 7 needs a program to containerise.
+`apps/pipeline` is that program: a CLI over the same libraries — `migrate`, `demo`,
+`balances`, `verify`, `ingest-settlement`.
+
+It occupies exactly the position `apps/api` will occupy, and obeys the same rule: it owns
+no business logic, only transport and dispatch. When the service arrives it *joins* this
+one rather than replacing it — a service and a CLI over one set of libraries is precisely
+the reuse the library/deployable split exists to allow, and nothing under `packages/`
+changes when it lands. See [DECISIONS.md § D-022](DECISIONS.md).
+
+---
+
 ## The dependency graph
 
 Dependencies only ever point downward toward `canon`. No cycles.
 
 ```
-                    apps/api                    ← the deployable; nothing depends on it
-                   /   |    \    \
-                  /    |     \    \
-    packages/reconciler|      \    \
-            |    \     |       \    \
-            |     \    |        \    \
-  packages/ledger-core |   packages/ingest  →  pay-normalize
-            \          |        /
-             \         |       /
-              \        |      /
-               packages/canon               ← the leaf; depends on nothing
+       apps/pipeline (today)          apps/api (Phase 6)     ← deployables; nothing
+              \                        /   |    \    \          depends on them
+               \                      /    |     \    \
+                \   packages/reconciler    |      \    \       (Phase 3)
+                 \      |    \             |       \    \
+                  \     |     \            |        \    \
+          packages/ledger-core  \          |    packages/ingest  →  @pay-normalize/*
+                       \         \         |        /
+                        \         \        |       /
+                         \         \       |      /
+                              packages/canon               ← the leaf; depends on nothing
 ```
 
 Read as edges (`A → B` means "A imports B"):
 
 | From | Imports |
 |---|---|
-| `apps/api` | `canon`, `ledger-core`, `ingest`, `reconciler` |
+| `apps/pipeline`, `apps/api` | `canon`, `ledger-core`, `ingest`, `reconciler` |
 | `reconciler` | `canon`, `ledger-core` |
-| `ingest` | `canon`, `pay-normalize` |
-| `ledger-core` | `canon`, Postgres client |
-| `canon` | *(nothing internal)* |
+| `ingest` | `canon`, `@pay-normalize/*` |
+| `ledger-core` | `canon`, `pg` |
+| `canon` | *(nothing)* |
 
 That acyclic, one-directional shape is what makes the system reasoned-about and testable —
 and it is the thing a senior reviewer checks first.
@@ -194,10 +224,10 @@ So the container-building process, concretely, in a monorepo:
    that imports them. The output is a runnable JS build of the app with all its internal
    package code included — because you cannot run `apps/api` without the `ledger-core` code
    it calls, that code is now baked in.
-4. **Declare how to run.** The Dockerfile exposes the port Fastify listens on and sets the
-   start command (`node apps/api/dist/main.js`). This is what makes the image a *service*:
-   when the container starts, it launches the long-lived process that binds the port and
-   waits for requests.
+4. **Declare how to run.** The Dockerfile sets the start command —
+   `node apps/pipeline/dist/main.js demo` today, and the Fastify service in Phase 6, at
+   which point it also exposes the port. This is the line that decides what the image
+   *is*; everything above it is the same either way.
 5. **`docker build` freezes all of that into an image** — the sealed artifact. Not an
    `.exe`: an image containing Linux + Node + the app + all four packages' compiled code +
    external deps, sealed together.

@@ -1,9 +1,17 @@
-import type { CanonicalPayment } from '@recon/canon';
-import { negate } from '@recon/canon';
+import type {
+  CanonicalPayment,
+  IdempotencyKey,
+  Money,
+  Reference,
+  SourceId,
+  TransactionId,
+} from '@recon/canon';
+import { add, format, isNegative, isZero, negate, subtract, sum } from '@recon/canon';
 
 import { LedgerError } from './errors.js';
-import type { Executor } from './pool.js';
-import { postTransaction, type PostTransactionResult } from './post.js';
+import { inTransaction, type Executor } from './pool.js';
+import { postTransaction, type EntryInput, type PostTransactionResult } from './post.js';
+import { transition } from './state.js';
 
 /**
  * How our books record the events of this business.
@@ -13,8 +21,9 @@ import { postTransaction, type PostTransactionResult } from './post.js';
  * touches. Both belong to the ledger, because both are statements about our chart of
  * accounts, and neither has any idea which PSP the event came from.
  *
- * The input is a `CanonicalPayment` — canonical language from `@recon/canon`, not a
- * foreign shape. Law 7 forbids branching on the source, not knowing that payments exist.
+ * The rule that shapes everything below: **a PSP's word never moves `bank_account`.** A
+ * settlement report is a claim about the future by a party with an interest in it. Only a
+ * bank statement — our own bank, about our own account — books cash.
  */
 
 export class UnbookablePaymentError extends LedgerError {
@@ -28,7 +37,7 @@ export class UnbookablePaymentError extends LedgerError {
 }
 
 /**
- * Record the promise: a customer has paid, and the PSP now owes us.
+ * T+0. Record the promise: a customer has paid, and the PSP now owes us.
  *
  *   psp_receivable    +gross    (they owe us)
  *   merchant_revenue  −gross    (we earned it)
@@ -37,11 +46,11 @@ export class UnbookablePaymentError extends LedgerError {
  * booked at all. This is not an omission. At this moment the fee is genuinely unknown:
  * a rate card can change, a cap can apply, an international surcharge can land. Booking
  * an estimate would put a guess in the books and require a correction later, for
- * something we never had to assert in the first place. The fee is booked when the
- * settlement reveals it, against this same receivable.
+ * something we never had to assert in the first place. The fee is booked when the bank
+ * confirms what actually arrived.
  *
  * The consequence is the most useful number in the business: at any instant,
- * `psp_receivable` is exactly the money promised but not yet paid.
+ * `psp_receivable` is exactly the money promised but not yet in our hands.
  */
 export async function bookAuthorizedPayment(
   db: Executor,
@@ -62,4 +71,283 @@ export async function bookAuthorizedPayment(
       { accountId: 'merchant_revenue', amount: negate(payment.gross) },
     ],
   });
+}
+
+/**
+ * T+1 books nothing.
+ *
+ * There is deliberately no `bookPayoutReport` in this file. When a PSP reports a payout we
+ * match payments to it, name its deductions and record all of it — in the reconciler's
+ * tables, as a `Payout` with status `reported`. Not one entry is written, because nothing
+ * economic has happened: the PSP has described its own intentions. A ledger that books on
+ * intent is a ledger that reports cash it does not have.
+ */
+
+/**
+ * A promise this settlement discharges, and how much of it.
+ *
+ * `receivable` is what the transaction opened the receivable at, read back from its own
+ * entries rather than remembered. `amount` is how much of that this booking closes —
+ * usually all of it, but a PSP may settle one payment across two payouts, and calling a
+ * half-settled payment mismatched would escalate something that is going perfectly well.
+ */
+export interface DischargedPromise {
+  readonly transactionId: TransactionId;
+  readonly receivable: Money;
+  readonly amount: Money;
+}
+
+/**
+ * The bank evidence that lets any of this be booked at all.
+ *
+ * `transactionId` is not a field: the bank credit's idempotency key *is* the transaction
+ * id (D-014). One credit is one economic event, and giving the booking a second identity
+ * would mean two uniqueness constraints that can disagree. With the equality, a
+ * reconciliation that dies halfway and is retried cannot double-book — the second attempt
+ * collides on the primary key.
+ */
+export interface BankConfirmation {
+  /** The bank statement line's idempotency key, which becomes the transaction's id. */
+  readonly creditKey: IdempotencyKey;
+  readonly source: SourceId;
+  readonly reference: Reference;
+  /** The statement's value date: when the bank says the money landed. */
+  readonly valueDate: Date;
+  readonly recordedAt: Date;
+  /** What the bank actually credited. Not what anybody said it would be. */
+  readonly credited: Money;
+}
+
+export class ImplausibleSettlementError extends LedgerError {
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/**
+ * T+1/T+2. Book the cash — the only function in the system that may increase
+ * `bank_account`.
+ *
+ *   bank_account    +credited            (the bank's own word for it)
+ *   fees_expense    +fee                 ┐
+ *   taxes_withheld  +tax                 │ every deduction, named, and booked
+ *   psp_reserve     +reserve             │ to the account that describes it
+ *   penalties       +penalty             ┘
+ *   psp_receivable  −Σ discharged        (they no longer owe us this much)
+ *
+ * The deductions are the ones the reconciler could *name*, from the PSP's own itemised
+ * report — never a residue computed by subtraction. If the named deductions plus the
+ * credit do not equal the receivable being discharged, this refuses to post.
+ *
+ * That refusal is the whole point. The obvious alternative is to plug the difference into
+ * `fees_expense` so it balances, which always works and is always a lie: an unexplained
+ * ₦40,000 shortfall becomes an unusually expensive Tuesday that nobody investigates. A
+ * transaction that will not balance without a plug is a transaction whose story we do not
+ * know, and the honest response is to escalate rather than to write it down as though we
+ * did.
+ */
+export async function bookBankConfirmedSettlement(
+  db: Executor,
+  confirmation: BankConfirmation,
+  discharged: readonly DischargedPromise[],
+  deductions: readonly EntryInput[],
+): Promise<PostTransactionResult> {
+  if (discharged.length === 0) {
+    throw new ImplausibleSettlementError(
+      `Refusing to book bank credit "${confirmation.creditKey}" against no promise at ` +
+        `all. Money with nothing to discharge is a PHANTOM_CREDIT, not a settlement.`,
+    );
+  }
+
+  if (isNegative(confirmation.credited)) {
+    throw new ImplausibleSettlementError(
+      `Refusing to book bank credit "${confirmation.creditKey}" of ` +
+        `${format(confirmation.credited)}. A negative credit is a debit, and a debit is a ` +
+        `returned payout — a different event with a different booking.`,
+    );
+  }
+
+  const closing = sum(discharged.map((promise) => promise.amount));
+  const named = sum(deductions.map((deduction) => deduction.amount));
+  const unexplained = subtract(closing, add(confirmation.credited, named));
+
+  if (!isZero(unexplained)) {
+    throw new ImplausibleSettlementError(
+      `Refusing to book bank credit "${confirmation.creditKey}": discharging ` +
+        `${format(closing)} of receivable against ${format(confirmation.credited)} of cash ` +
+        `and ${format(named)} of named deductions leaves ${format(unexplained)} ` +
+        `unaccounted for. A booking that needs a plug entry to balance is a booking whose ` +
+        `story we do not know.`,
+    );
+  }
+
+  return inTransaction(db, async (client) => {
+    const result = await postTransaction(client, {
+      transactionId: confirmation.creditKey,
+      source: confirmation.source,
+      reference: confirmation.reference,
+      occurredAt: confirmation.valueDate,
+      recordedAt: confirmation.recordedAt,
+      // The cash has landed. There is no later event this transaction waits for.
+      initialState: 'settled',
+      entries: nonZero([
+        { accountId: 'bank_account', amount: confirmation.credited },
+        ...deductions,
+        { accountId: 'psp_receivable', amount: negate(closing) },
+      ]),
+    });
+
+    if (result.outcome === 'posted') {
+      for (const promise of discharged) {
+        // A payment settled only in part is still waiting for the rest, so it keeps its
+        // `authorized` state. Only a full discharge ends its story.
+        if (!isZero(subtract(promise.receivable, promise.amount))) continue;
+        await transition(client, {
+          transactionId: promise.transactionId,
+          to: 'settled',
+          at: confirmation.recordedAt,
+          causedBy: confirmation.creditKey,
+        });
+      }
+    }
+
+    return result;
+  });
+}
+
+/** The identity of any non-settlement event the reconciler books. */
+export interface BookingEvent {
+  readonly key: IdempotencyKey;
+  readonly source: SourceId;
+  readonly reference: Reference;
+  readonly at: Date;
+}
+
+/**
+ * The promise was undone before any money came.
+ *
+ *   reversals       +amount    (contra-income: income earned, then given back)
+ *   psp_receivable  −amount    (they owe us nothing after all)
+ *
+ * Note what this does *not* do: touch `merchant_revenue`. The revenue was genuinely
+ * earned at the moment the customer paid, and editing that credit away would erase the
+ * fact that it ever happened. A contra-income account records the giving-back as its own
+ * event, so gross revenue reporting survives the refund and an auditor sees both halves.
+ *
+ * This is the domain decision `reverse()` deliberately refuses to make (D-024). That
+ * primitive is an exact negation, correct without knowing what caused it; this one knows
+ * it is looking at a refunded payment and books it as one.
+ *
+ * No bank evidence is required, and none is possible: nothing was ever credited, so there
+ * is nothing for a statement to confirm.
+ */
+export async function bookReversal(
+  db: Executor,
+  event: BookingEvent,
+  promise: DischargedPromise,
+): Promise<PostTransactionResult> {
+  return inTransaction(db, async (client) => {
+    const result = await postTransaction(client, {
+      transactionId: event.key,
+      source: event.source,
+      reference: event.reference,
+      occurredAt: event.at,
+      recordedAt: event.at,
+      initialState: 'settled',
+      entries: [
+        { accountId: 'reversals', amount: promise.amount },
+        { accountId: 'psp_receivable', amount: negate(promise.amount) },
+      ],
+    });
+
+    if (result.outcome === 'posted') {
+      await transition(client, {
+        transactionId: promise.transactionId,
+        to: 'reversed',
+        at: event.at,
+        causedBy: event.key,
+      });
+    }
+
+    return result;
+  });
+}
+
+/**
+ * Money clawed back *after* it had already settled.
+ *
+ *   chargebacks   +amount
+ *   bank_account  −amount    (the cash really has left the account)
+ *
+ * This one does move `bank_account` without a credit, and it must: the debit is itself
+ * bank evidence. It comes from a statement line, not from a PSP's assertion.
+ *
+ * The original transaction is not transitioned, and that is the point: it reached
+ * `settled`, which is terminal, and it stays there. A chargeback is not an un-settling —
+ * it is a later economic event with its own transaction, born terminal because nothing
+ * further is expected of it.
+ */
+export async function bookChargeback(
+  db: Executor,
+  event: BookingEvent,
+  amount: Money,
+): Promise<PostTransactionResult> {
+  if (isNegative(amount) || isZero(amount)) {
+    throw new ImplausibleSettlementError(
+      `Refusing to book chargeback "${event.key}" of ${format(amount)}. A clawback of ` +
+        `nothing, or of a negative amount, is a parsing error wearing a plausible face.`,
+    );
+  }
+
+  return postTransaction(db, {
+    transactionId: event.key,
+    source: event.source,
+    reference: event.reference,
+    occurredAt: event.at,
+    recordedAt: event.at,
+    initialState: 'settled',
+    entries: [
+      { accountId: 'chargebacks', amount },
+      { accountId: 'bank_account', amount: negate(amount) },
+    ],
+  });
+}
+
+/**
+ * The bank sent a payout back after we had already booked it as cash.
+ *
+ * An exact negation of the confirming transaction, written as its own event rather than by
+ * unwinding the original (Law 2). Every account it touched moves back, which means the
+ * receivable reopens: the PSP still owes us, and the payments it covered go back to
+ * waiting. Their lifecycle state is not rolled back here — `settled` is terminal, and the
+ * fact that they were once settled is part of the history.
+ */
+export async function bookReturnedPayout(
+  db: Executor,
+  event: BookingEvent,
+  original: readonly EntryInput[],
+): Promise<PostTransactionResult> {
+  return postTransaction(db, {
+    transactionId: event.key,
+    source: event.source,
+    reference: event.reference,
+    occurredAt: event.at,
+    recordedAt: event.at,
+    initialState: 'settled',
+    entries: original.map((entry) => ({
+      accountId: entry.accountId,
+      amount: negate(entry.amount),
+    })),
+  });
+}
+
+/**
+ * Drop zero-amount entries.
+ *
+ * A settlement with no fee is real — a zero-rated channel, a waived flat component — and
+ * writing `fees_expense 0` for it would put a line in the permanent record that says
+ * nothing. Dropping it changes no balance, because zero is zero.
+ */
+function nonZero(entries: readonly EntryInput[]): EntryInput[] {
+  return entries.filter((entry) => !isZero(entry.amount));
 }

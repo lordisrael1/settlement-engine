@@ -125,9 +125,56 @@ Each phase below is a self-contained unit of work with an exit criterion. Do not
 
 **Done when.** A raw Paystack settlement CSV and a raw Flutterwave settlement payload both become identical-shaped `SettlementLine[]`, malformed rows are cleanly rejected with reasons, re-ingesting the same file is a no-op, and no downstream code can tell which source produced a line.
 
+> **Extended by Phase 3.** The boundary now has a **third half**: bank statements. There is
+> no `pay-normalize` for them and there could not be one — every Nigerian bank exports a
+> different CSV — so the layer defines one canonical statement shape and owns the two things
+> that matter: narration is *tokenised into candidates*, never resolved to a reference
+> (§ D-033), and debits are kept, because a returned payout and a chargeback both arrive as
+> debits. Every record produced by any of the three halves now carries the SHA-256 of the
+> file it came from, the uploader, the receipt time and the parser version.
+
+> **As built.** This phase turned out much thinner than written, because `@pay-normalize/core` already defines `parseSettlementFile` on its `Connector` interface and three connectors already implement it. The exit criterion is met with **Flutterwave** (a JSON envelope with a nested data array) and **Nomba** (a bare array of records) — two genuinely different foreign shapes. The Paystack settlement adapter is deliberately absent: its connector refuses to parse exports until a sanitized real file pins the column layout, and inventing one would produce a parser that looks right and is wrong. See [DECISIONS.md](DECISIONS.md) § D-012 and § D-025.
+
 ## Phase 3 — The reconciliation engine (the matching pipeline)
 
-**Why it exists.** This is where the promise meets the money. It compares the ledger's `authorized` transactions against ingested `SettlementLine`s and partitions them into matched, explained, and unexplained. This is the intellectual core and the differentiator.
+> **Revised after the first build.** The phase as originally written is two-way: the
+> ledger's promise against the PSP's settlement report, booking cash on the match. That is
+> internally consistent and wrong about the world — a PSP's report is a claim by an
+> interested party about its own future behaviour, not money. The phase is now **three-way**,
+> and the section below is the current specification. See [DECISIONS.md](DECISIONS.md)
+> § D-027 through § D-036.
+
+**The three records.** Reconciliation compares three independent accounts of the same money:
+
+| | Record | Arrives | What it proves |
+|---|---|---|---|
+| T+0 | **Webhook** | seconds | a customer paid; the PSP owes us |
+| T+1 | **PSP settlement report** | next business day | the PSP *intends* to send a payout, less named deductions |
+| T+1/T+2 | **Bank statement** | when the money moves | cash is actually in our account |
+
+Only the third books cash:
+
+```
+T+0  Webhook — the promise
+     psp_receivable  +₦10,000
+     merchant_revenue −₦10,000
+
+T+1  PSP settlement report — a claim, not cash
+     Payout PO-1: gross ₦10,000, fee ₦150, VAT ₦11.25, payout ₦9,838.75
+     Match the payments to the payout, name every deduction.
+     NOTHING IS BOOKED.
+
+T+2  Bank statement — the only proof
+     Credit of ₦9,838.75 confirms PO-1
+     bank_account    +₦9,838.75
+     fees_expense    +₦150.00
+     taxes_withheld  +₦11.25
+     psp_receivable  −₦10,000.00
+```
+
+**Why it exists.** This is where the promise meets the money — and, crucially, where it is
+kept apart from the *claim* of money. It partitions everything into matched, explained, and
+unexplained. This is the intellectual core and the differentiator.
 
 **What it delivers.** A tiered matcher, cheapest and most confident first, each tier producing `MatchResult`s that carry a confidence and a reason code:
 
@@ -136,11 +183,35 @@ Each phase below is a self-contained unit of work with an exit criterion. Do not
 3. **Fuzzy / many-to-one match.** One settlement line batches several ledger transactions, or references are mangled. Solve as a bounded subset-sum / assignment problem: which combination of unmatched transactions sums to this line within tolerance and time window?
 4. **Timing-aware deferral.** An unmatched item within its source's settlement window is *not* an error — it is `pending settlement`. Only items past their window escalate (handed to Phase 4).
 
-- Every confirmed match **writes a new ledger transaction** moving value from `psp_receivable` to `bank_account` and booking the fee — so reconciliation *feeds* the ledger; they are one system, not two.
+**Stage three — the bank confirms it.** A bank credit is matched to a reported payout, by
+the payout's own reference where the narration carries it, otherwise by a unique amount and
+date. Only this stage **writes a ledger transaction** — cash to `bank_account`, every named
+deduction to its own account, and the receivable closed. Reconciliation *feeds* the ledger;
+they are one system, not two.
+
+- **Payouts are first-class.** A `Payout` has its own reference and its own itemised
+  deductions; settlement lines belong to one. Sources that name the movement give strictly
+  better information than sources that only list transactions.
+- **Deductions are named, never residual.** Fees, VAT and stamp duty, rolling reserves,
+  dispute holds, penalties, refunds and chargebacks each book to their own account. A
+  reserve is an *asset* — the PSP is holding our money, not keeping it.
+- **Allocation is an amount**, so one payment can be settled across two payouts and one
+  payout can cover many payments. Partial settlement is a state, not a mismatch.
+- **Fee expectations come from dated contracts**, per merchant, per source, with VAT and an
+  approver — so reconciling March uses March's rates.
+- **Deadlines come from a business calendar**: cut-off times, business days, weekends and
+  Nigerian public holidays, plus a grace period.
+- **A booking that will not balance without a plug entry is refused.** Forcing the
+  difference into `fees_expense` always works and always lies.
 
 **Laws enforced.** Law 1 and Law 5 (matching is deterministic — same inputs, same partition), Law 7.
 
-**Done when.** Given a ledger and a settlement file with deliberate fees and a batched multi-transaction payout, the engine auto-matches through tiers 1–3, books the settlement and fee transactions correctly, and leaves only the genuinely-unexplainable items for Phase 4 — deterministically, the same way every run.
+**Done when.** Given a ledger, a PSP settlement report with deliberate fees, taxes and
+reserves, and a bank statement, the engine: matches payments to the reported payout without
+booking anything; books the cash, the fees and every named deduction only when an
+independent bank credit confirms it; leaves a reported-but-uncredited payout sitting as
+`AWAITING_BANK_CREDIT`; and escalates duplicated, returned, short or unidentifiable credits
+— deterministically, the same way every run.
 
 ## Phase 4 — Exceptions, lifecycle, and settlement windows
 
@@ -148,9 +219,11 @@ Each phase below is a self-contained unit of work with an exit criterion. Do not
 
 **What it delivers.**
 - The unmatched-item state machine: `pending_settlement` (within window) → `overdue` (past window) → `exception` (past window with no explanation), plus resolution states.
-- The **exception queue**: every item that reaches `exception`, surfaced with full context — the promise, the expected money, the window it missed, and the candidate explanations the matcher considered and rejected.
-- Reason-code taxonomy (Appendix C): `FEE_VARIANCE`, `REVERSAL`, `CHARGEBACK`, `PENDING_T_PLUS_N`, `FX_ROUNDING`, `PHANTOM_CREDIT` (money with no promise — possible fraud or a dropped webhook), `MISSING_SETTLEMENT` (promise with no money past window).
-- Window logic driven by each source's declared settlement window from Phase 2: a card transaction unmatched after 2 hours is normal; the same after 3 days is an exception. A virtual-account credit unmatched after minutes is already suspicious.
+- The **exception queue**: every item that reaches `exception`, surfaced with full context — the promise, the expected money, the window it missed, the evidence file it came from, and the candidate explanations the matcher considered and rejected.
+- Reason-code taxonomy (Appendix C), grouped by `REASON_KIND` into match / explanation / exception.
+- Deadline logic driven by each source's **business calendar** from Phase 3: cut-off times, business days, weekends and public holidays. A card transaction unmatched after 2 hours is normal; the same after 3 business days is an exception. A virtual-account credit unmatched after minutes is already suspicious.
+- **Bank-side exceptions**, which only exist once the bank is a separate record: a duplicated credit, a returned payout, a credit short by more than a bank charge, and a credit whose narration identifies nothing.
+- **Human resolution as an append-only trail.** A reviewer never edits a match; they append a resolution carrying their identity, the action, the reason, the supporting evidence, and — above a threshold — an approver. A change of mind is a second resolution, not a correction of the first. The `resolutions` table and its vocabulary land in Phase 3; the workflow and the reviewer UI are Phase 6's.
 
 **Attributes advanced.** Explainability, timing-awareness.
 
@@ -244,22 +317,50 @@ Each phase below is a self-contained unit of work with an exit criterion. Do not
 | Account | Type | Meaning |
 |---|---|---|
 | `psp_receivable` | Asset | Money a PSP owes us after a promise, before settlement |
-| `bank_account` | Asset | Real settled cash in our corporate account |
+| `bank_account` | Asset | Real settled cash, confirmed by a bank statement |
 | `merchant_revenue` | Income | Earned income from a payment |
 | `fees_expense` | Expense | Cost of PSP fees |
+| `taxes_withheld` | Expense | VAT, stamp duty or withholding tax deducted at source |
+| `penalties` | Expense | Fines a PSP or bank deducted from a payout |
+| `bank_charges` | Expense | Charges the bank levied on a credit, invisible to the PSP |
+| `psp_reserve` | Asset | Rolling reserve or dispute hold — still owed, just later |
 | `reversals` | Contra-income | Refunds/reversals of previously recorded payments |
 | `chargebacks` | Contra-income | Clawbacks initiated after settlement |
 | `suspense` | Holding | Phantom credits / unidentified money pending investigation |
 
+> Added in Phase 3's three-way redesign: `taxes_withheld`, `penalties`, `bank_charges` and
+> `psp_reserve`. They exist so that the gap between what we were owed and what arrived is
+> always a **named** thing rather than a residue swept into fees. See § D-029.
+
 ## Appendix C — Reason codes
 
-`FEE_VARIANCE` · `REVERSAL` · `CHARGEBACK` · `PENDING_T_PLUS_N` · `FX_ROUNDING` · `PHANTOM_CREDIT` · `MISSING_SETTLEMENT` · `EXACT_MATCH` · `FEE_ADJUSTED_MATCH` · `BATCH_MATCH`
+**Matches** — the difference is fully accounted for.
+`EXACT_MATCH` · `FEE_ADJUSTED_MATCH` · `BATCH_MATCH` · `PAYOUT_MATCH` · `BANK_CONFIRMED`
+
+**Explanations** — the difference is real but understood.
+`FEE_VARIANCE` · `AWAITING_BANK_CREDIT` · `PARTIAL_SETTLEMENT` · `RESERVE_WITHHELD` ·
+`TAX_WITHHELD` · `PENALTY` · `BANK_CHARGE` · `REVERSAL` · `CHARGEBACK` ·
+`PENDING_T_PLUS_N` · `FX_ROUNDING`
+
+**Exceptions** — the difference is real and unexplained. A human sees these.
+`PHANTOM_CREDIT` · `MISSING_SETTLEMENT` · `AMOUNT_MISMATCH` · `DUPLICATE_BANK_CREDIT` ·
+`RETURNED_PAYOUT` · `UNIDENTIFIED_CREDIT` · `PAYOUT_UNBALANCED`
+
+The grouping is machine-readable as `REASON_KIND` in `packages/canon`, so the three-way
+partition is a property of the vocabulary rather than a convention the matcher remembers.
 
 ## Appendix D — Glossary
 
 - **Promise** — the fast information that a payment succeeded (a webhook). Recorded immediately as an `authorized` transaction.
-- **Money** — the slow settled cash, arriving via a settlement file/payout, net of fees.
-- **Settlement window** — the expected delay, per source, between promise and money (T+1 for card/PSP-aggregated; near-instant for NIP/virtual-account).
+- **Payout** — one money movement a PSP says it is making, with its own reference and its own itemised deductions, covering many payments. A *claim*, not cash.
+- **Money** — cash confirmed by a bank statement. Nothing else is money.
+- **Expected inflow** — a payout we are waiting on the bank to confirm. `derived` when we inferred the grouping ourselves rather than being told it.
+- **Adjustment** — a named deduction from a payout: fee, tax, reserve, reserve release, penalty, refund, chargeback. Never a residue.
+- **Allocation** — how much of one payment a given inflow discharges. An amount, so settlement can be partial or split.
+- **Fee contract** — a rate card with effective dates, a merchant, a VAT rate and an approver. Historical reconciliation uses the contract that was in force at the time.
+- **Business calendar** — cut-off time, business days, weekends and public holidays, per source. What makes T+1 a business rule rather than 24 hours.
+- **Evidence** — the file a record came from, identified by the SHA-256 of its bytes, with its uploader, receipt time and parser version.
+- **Resolution** — a human's appended decision about something the machine escalated. Never an edit.
 - **Ingest-canon** — the inbound boundary that translates foreign source data into canonical events.
 - **API** — the outbound boundary that exposes capabilities and receives requests over a protocol.
 - **Exception** — an unmatched item past its settlement window with no automatic explanation; the only thing a human should ever see.

@@ -6,12 +6,17 @@
  * boundary) expressed as code structure.
  *
  * Read the files in this order to learn the domain:
- *   money.ts        what an amount is                    (Law 3)
- *   accounts.ts     where value can sit                  (Appendix B)
- *   identifiers.ts  how events are named and deduped     (Law 4)
- *   ledger.ts       the double-entry record itself       (Laws 1, 2)
- *   payment.ts      the promise — fast information
- *   settlement.ts   the money — slow cash
+ *   money.ts        what an amount is                      (Law 3)
+ *   accounts.ts     where value can sit                    (Appendix B)
+ *   identifiers.ts  how events are named and deduped       (Law 4)
+ *   ledger.ts       the double-entry record itself         (Laws 1, 2)
+ *   payment.ts      record one — the promise, from a webhook
+ *   settlement.ts   record two — one payment inside a PSP's payout report
+ *   payout.ts       …and the payout itself, with its named deductions
+ *   bank.ts         record three — the bank statement, the only proof of cash
+ *   calendar.ts     when money is actually late, in business days
+ *   fees.ts         what we expected to be charged, per contract, per date
+ *   evidence.ts     the documents we reasoned from, and the humans who decided
  *   matching.ts     what reconciliation concluded, and why
  */
 
@@ -21,4 +26,9 @@ export * from './identifiers.js';
 export * from './ledger.js';
 export * from './payment.js';
 export * from './settlement.js';
+export * from './payout.js';
+export * from './bank.js';
+export * from './calendar.js';
+export * from './fees.js';
+export * from './evidence.js';
 export * from './matching.js';

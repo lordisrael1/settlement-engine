@@ -484,3 +484,242 @@ exact amount, and reports the fee it observed.
 card is checked against Paystack's own arithmetic rather than against our reading of their
 pricing page — on three amounts that each exercise a different branch (flat waived, exactly
 at the waiver threshold, percentage plus flat). All three agree to the kobo.
+
+---
+
+# Phase 3 — the three-way redesign
+
+## D-027 · 2026-08-16 · Reconciliation is three-way: webhook, PSP report, bank statement
+
+**Decision.** The webhook, the PSP's settlement report and the bank statement are three
+independent records. **Only bank evidence may increase `bank_account`.** A PSP report is
+recorded as a `Payout` with status `reported`, matched to the payments it covers, and
+books *nothing*.
+
+**Why.** A settlement report is a party with an interest in the answer describing its own
+future behaviour. Treating it as cash makes four ordinary events invisible: a payout that
+is reported and never sent, one the bank returns two days later, one credited short of a
+correspondent-bank charge, and one credited twice. Each of those is a real Tuesday, and
+each is undetectable by a system whose books already say the money arrived.
+
+**Consequence, stated plainly.** The first version of Phase 3 booked
+`bank_account +net / fees_expense +fee / psp_receivable −gross` the moment a settlement
+line matched a promise. That was internally consistent and wrong about the world. It is
+gone; `bookSettlement` no longer exists, and `bookBankConfirmedSettlement` replaces it.
+
+**Alternatives rejected.** A `psp_payout_expected` clearing account moved between the two
+stages. It reads well and buys nothing here: the reported-not-received state is a
+reconciliation fact with a lifecycle, not a balance, and it lives in `expected_inflows`
+where it can carry a value date, a source and an evidence id. Adding a ledger account for
+it would put a second, weaker copy of that state in the books.
+
+---
+
+## D-028 · 2026-08-16 · The payout is a first-class entity, and inflows unify the two source shapes
+
+**Decision.** `Payout` carries a `payoutReference`, its own itemised deductions and an
+`expectedNet`. Settlement lines belong to one. Both shapes normalise into an internal
+`ExpectedInflow`, which is the only thing stage three matches against.
+
+**Why.** Sources fall into two camps and flattening them loses the distinction that makes
+matching tractable. Flutterwave names the movement — one reference, one fee breakdown,
+`charge_count` charges it does not enumerate. Nomba and Monnify list transactions and
+leave the movement implicit. A named payout is *strictly better information*: the PSP has
+told us the grouping, so arithmetic only has to confirm it rather than discover it.
+
+Writing the bank matcher twice, once per shape, would be two chances to get it subtly
+differently wrong. `ExpectedInflow` carries what stage three actually needs — how much,
+when, from whom, which promises, what was deducted — and a `derived` flag, because an
+inflow the PSP told us about and one we grouped ourselves deserve different treatment in
+an exception queue.
+
+**Cost accepted.** Derived inflows are keyed by source and settlement date, which is a
+grouping we invented. It is labelled as such, and a bank credit that does not match it
+escalates rather than being forced onto it.
+
+---
+
+## D-029 · 2026-08-16 · Deductions are named, and a booking that needs a plug is refused
+
+**Decision.** `AdjustmentKind` is `fee | tax | reserve | reserve_release | penalty |
+refund | chargeback`, each mapped to its own account. `bookBankConfirmedSettlement`
+throws unless `Σ discharged = credited + Σ named deductions`.
+
+**Why.** "The payout is ₦4,200 short" is not a fact anybody can act on. "₦4,200 is a
+rolling reserve you get back in 90 days" is. A reserve is an **asset** — the PSP is
+holding our money, not keeping it — and booking it as a cost understates what we are owed
+by exactly the amount we are owed. Tax is an expense but not the PSP's, so it gets
+`taxes_withheld` rather than inflating what looks like PSP pricing.
+
+The refusal to plug is the load-bearing half. Forcing the difference into `fees_expense`
+always balances and always lies: an unexplained ₦40,000 shortfall becomes an unusually
+expensive Tuesday nobody investigates. A transaction that will not balance without a plug
+is one whose story we do not know, and escalating is the honest response.
+
+**Related.** `payoutArithmetic` checks the PSP's report against *itself* before any
+matching. A file whose declared net does not equal its gross less its own itemised
+deductions raises `PAYOUT_UNBALANCED`, because otherwise every downstream discrepancy
+gets blamed on the payments rather than on the file.
+
+---
+
+## D-030 · 2026-08-16 · Fee contracts are versioned data, not a function
+
+**Decision.** `FeeContract` carries `effectiveFrom`/`effectiveTo`, a merchant, a VAT rate
+and an approver. `FeeModel` is `(gross, at) => FeeBreakdown | null`. Contracts live in
+`fee_contracts` with a `btree_gist` exclusion constraint forbidding overlap.
+
+**Supersedes** the `expectedFee: FeeModel | null` field on `SourceProfile` from D-026, and
+the single-rate `feeModel(card)` from Phase 2.
+
+**Why.** Three things a constant cannot do. **Reconciling last quarter must use last
+quarter's rates** — applying today's renegotiated card to March invents a fee variance on
+every March payment, and history does not change because a contract did. **VAT is its own
+deduction**, bound for the tax authority rather than the PSP, and a model returning one
+number cannot separate them. **A rate is an assertion somebody approved**, so "why did we
+expect 1.4%?" has an answer with a name and a date on it.
+
+Overlap is a database constraint rather than a read-time tie-break because two contracts
+in force at once makes fee expectations non-deterministic, which is a Law 5 problem
+wearing a data-entry costume.
+
+**Cost accepted.** Contract administration and an approval workflow. The published rate
+cards remain as seeds, with `approvedBy: 'published-rate-card'` — a list price we read,
+not an agreement anyone signed, and the queue can tell the difference.
+
+---
+
+## D-031 · 2026-08-16 · Deadlines are business days and cut-offs, not fixed minutes
+
+**Decision.** `BusinessCalendar` replaces `SettlementWindow`: a cut-off time, a count of
+business days, weekends, Nigerian public holidays, and a grace period.
+
+**Supersedes D-008 and the window half of D-026.** `deadlineMinutes` is gone.
+
+**Why.** T+1 is a business rule. A card payment taken at 6pm on the Friday of a long
+weekend is not overdue on Saturday evening, and a system that says so raises an exception
+every single weekend until the people reading the queue stop reading it. An alert that
+cries wolf is worse than no alert, which was already D-026's argument — this is the same
+argument taken seriously enough to model the calendar.
+
+Cut-off and grace are separated deliberately: the deadline is when money was *expected*,
+grace is how long its absence is tolerated. Conflating them is what made the old fixed
+window need padding to T+2 to avoid false alerts, which in turn made genuinely late money
+invisible for an extra day.
+
+**Cost accepted.** Holiday tables go stale, and two Nigerian holidays move with the lunar
+calendar and are announced days ahead. The failure is visible and mild: a settlement that
+was never late gets flagged, which is a false alert rather than a silent miss.
+
+---
+
+## D-032 · 2026-08-16 · Allocation is an amount, so settlement can be partial and split
+
+**Decision.** `inflow_allocations` links a promise to an inflow with an **amount**. A
+deferred constraint trigger enforces that a payment is never allocated beyond its
+receivable. A partly-discharged promise keeps its `authorized` state.
+
+**Why.** A PSP can settle half a payment now and half when a dispute hold lifts, and one
+payout covers many payments. Modelling the link as a quantity is what lets both be true at
+once. Under the previous flag-shaped design a half-settled payment had no representation,
+so it was reported as a mismatch — escalating something that was going perfectly well.
+
+The over-allocation trigger is in the database because without it two payouts could each
+claim the whole of one payment and the ledger would discharge the same receivable twice.
+That is a check no application-level guard should be trusted with.
+
+**Partial matching refuses to guess.** Taking part of a promise is a stronger claim than
+taking all of one, because the leftover stays open and gets matched again later. So a
+payout smaller than any single receivable is allocated only when exactly one candidate
+could absorb it.
+
+---
+
+## D-033 · 2026-08-16 · Evidence is content-addressed and kept; narration is tokenised, never interpreted
+
+**Decision.** Every canonical record carries an `evidenceId` — the SHA-256 of the file it
+came from. `evidence` stores the bytes, the uploader, the receipt time and the parser
+version, and is append-only. Bank narration is parsed into `narrationTokens` (candidates),
+never into a resolved reference.
+
+**Why.** Six months later, "the system matched it" is not an answer. *Which file? Who
+uploaded it? Which parser read it?* are the questions actually asked, and a system that
+cannot answer them has produced numbers nobody can defend. Content-addressing makes
+re-uploading a file a no-op by construction, and makes "is this the file you used?"
+answerable by anyone holding the file.
+
+`parserVersion` earns its place because a parser is part of the reasoning: when an adapter
+is corrected, every conclusion the old one reached is suspect, and findable.
+
+**On narration.** It is the only thing linking a credit to a payout for most Nigerian
+banks, and it is truncated, inconsistent and often useless. A parser that picked a
+reference out of it would be guessing invisibly, and its guess would be indistinguishable
+from a reference the bank actually supplied. So the parser extracts candidates and the
+matcher resolves them against payouts it actually holds. This is D-010's rule — narration
+is evidence, never a decision — applied to the bank side.
+
+**Cost accepted.** Storage, retention and sensitive-data controls. `evidence.raw` is
+nullable so a deployment can truncate on a schedule and keep the hash forever.
+
+---
+
+## D-034 · 2026-08-16 · Human resolutions are appended, never applied
+
+**Decision.** `resolutions` is append-only: subject, action, reason, a named person, a
+timestamp, optional supporting evidence and an optional approver. There is no
+`updateResolution`.
+
+**Why.** Law 2, extended from the ledger to the judgements made about it. A reviewer does
+not edit a match, change an amount or clear an exception — they state what they concluded
+and why. A wrong decision is corrected by a second resolution, so both stay visible and so
+does the fact that somebody changed their mind. `resolvedBy` is a person, not a role and
+not a service account, because "operations" cannot be asked what it was thinking.
+
+Approval is all-or-nothing by constraint: a half-recorded approval is worse than none,
+because it looks like oversight happened.
+
+**Cost accepted.** An operational UI and workflow, which is Phase 6's problem. The
+vocabulary and the table exist now so that Phase 4's exception queue has somewhere honest
+to write.
+
+---
+
+## D-035 · 2026-08-16 · The matcher refuses to guess, in four distinct places
+
+**Decision.** Ambiguity escalates rather than resolving. Specifically: a batch with two
+valid subsets; a bank credit fitting two open inflows equally well; a reference naming two
+promises; a shortfall larger than the source's declared bank-charge allowance.
+
+**Why.** These all share one shape. A wrong match does not fail loudly — it silently
+settles the wrong records and leaves the right ones to escalate later as inexplicable
+absences, long after anybody can reconstruct what happened. Escalating an ambiguous payout
+costs a human five minutes; guessing costs them a week of not knowing anything is wrong.
+
+The bank-charge allowance is the one deliberate tolerance in the system, and it is
+per-source data rather than a constant: correspondent banks take small charges nobody
+announces, so a credit ₦52.50 short is ordinary and one ₦52,000 short is not. The only
+thing separating them is a number somebody chose on purpose.
+
+**Note on tolerance generally.** Tier-3 batching remains exact-sum. In integer kobo with a
+dated fee contract there is nothing to be tolerant *of*, and a tolerance is how wrong
+matches get made. `FX_ROUNDING` exists for the day a second currency appears.
+
+---
+
+## D-036 · 2026-08-16 · `AMOUNT_MISMATCH` and six other reason codes join Appendix C
+
+**Decision.** Added: `PAYOUT_MATCH`, `BANK_CONFIRMED`, `AWAITING_BANK_CREDIT`,
+`PARTIAL_SETTLEMENT`, `RESERVE_WITHHELD`, `TAX_WITHHELD`, `PENALTY`, `BANK_CHARGE`,
+`AMOUNT_MISMATCH`, `DUPLICATE_BANK_CREDIT`, `RETURNED_PAYOUT`, `UNIDENTIFIED_CREDIT`,
+`PAYOUT_UNBALANCED`. `REASON_KIND` groups every code as a match, an explanation or an
+exception.
+
+**Why.** The doctrine says a difference with no reason code is not allowed to exist. The
+three-way model creates differences the original taxonomy could not name — chiefly
+"reported but not banked", which is neither matched nor missing and is the most common
+real state in Nigerian settlement. `AMOUNT_MISMATCH` closes the older gap: two records
+naming the same reference and disagreeing about the amount, with no fee contract able to
+explain it, previously had to masquerade as a phantom credit plus a missing settlement.
+
+The grouping lives in `canon` because it is a statement about what a code *means*, and a
+second copy of it in the matcher could disagree with this one.
