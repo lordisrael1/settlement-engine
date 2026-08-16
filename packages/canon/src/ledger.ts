@@ -8,6 +8,7 @@
 import type { AccountId } from './accounts.js';
 import type { EntryId, IdempotencyKey, Reference, SourceId, TransactionId } from './identifiers.js';
 import type { Money } from './money.js';
+import type { PaymentChannel } from './payment.js';
 
 /**
  * The lifecycle of a transaction *is* the story of the gap between information and money.
@@ -51,6 +52,15 @@ export interface LedgerTransaction {
   /** The source and its reference, carried for audit and matching — never branched on. */
   readonly source: SourceId;
   readonly reference: Reference;
+  /**
+   * Which rail carried the payment this transaction records, where one did.
+   *
+   * `null` for transactions that are not about a single payment — a settlement booking
+   * covering a batch, a manual adjustment. It is here rather than in a side table because
+   * the fee a promise is expected to attract depends on it, and a matcher that has to go
+   * looking for the channel will eventually stop looking and assume card.
+   */
+  readonly channel: PaymentChannel | null;
 
   /** When it happened in the world. Drives settlement windows. */
   readonly occurredAt: Date;

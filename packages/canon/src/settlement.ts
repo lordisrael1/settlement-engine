@@ -7,6 +7,7 @@
  * will actually be sent. Neither is cash until a bank statement agrees.
  */
 
+import type { RowLineage } from './evidence.js';
 import type {
   IdempotencyKey,
   MerchantId,
@@ -16,6 +17,7 @@ import type {
 } from './identifiers.js';
 import type { Money } from './money.js';
 import { equals, subtract } from './money.js';
+import type { PaymentChannel } from './payment.js';
 
 export type SettlementStatus = 'settled' | 'reversed' | 'chargeback';
 
@@ -32,6 +34,12 @@ export interface SettlementLine {
   readonly payoutReference: PayoutReference | null;
   /** Whose payment this was. Drives which fee contract applies. */
   readonly merchantId: MerchantId;
+  /**
+   * Which rail carried it. Also drives which fee contract applies — card and transfer are
+   * rarely the same rate — which is why it is a typed field rather than a `reasonHint`
+   * somebody downstream would have to parse (D-010).
+   */
+  readonly channel: PaymentChannel;
 
   /** What the source says the payment was worth before its deductions. */
   readonly gross: Money;
@@ -60,6 +68,8 @@ export interface SettlementLine {
   readonly reasonHints: readonly string[];
 
   readonly evidenceId: string;
+  /** Which row of that file. Without it, "reproduce this" means reading five thousand. */
+  readonly lineage: RowLineage;
   readonly idempotencyKey: IdempotencyKey;
 }
 

@@ -81,6 +81,9 @@ export function ingestWebhook(input: WebhookIngestInput): WebhookIngestResult {
       // and is booked when the settlement reveals it.
       gross: toMoney(txn.amountInKobo),
       status: txn.status,
+      // Carried from the moment we first hear of the payment, because the fee it will
+      // attract is priced per rail and reconstructing the rail later means guessing.
+      channel: txn.channel as CanonicalPayment['channel'],
       occurredAt: txn.occurredAt,
       idempotencyKey: idempotencyKey('payment', txn.dedupeKey),
     },

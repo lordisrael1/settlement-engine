@@ -14,7 +14,7 @@ import type {
   Payout,
   SettlementAdjustment,
 } from '@recon/canon';
-import { feeFor, feeModel, money } from '@recon/canon';
+import { ANY_CHANNEL, feeFor, feeModel, money, NO_LINEAGE } from '@recon/canon';
 import {
   bookAuthorizedPayment,
   createPool,
@@ -55,10 +55,11 @@ const ASOF = new Date('2026-08-13T12:00:00Z');
 const MERCHANT = 'merchant-under-test';
 
 const CALENDAR: BusinessCalendar = {
-  cutOffMinutesUtc: 16 * 60,
+  timeZone: 'Africa/Lagos',
+  cutOffMinutes: 17 * 60,
   settlementBusinessDays: 1,
   weekend: [0, 6],
-  holidays: [],
+  holidayCalendars: [],
   graceMinutes: 24 * 60,
 };
 
@@ -69,6 +70,12 @@ const CARD = {
   capKobo: null,
   vatBasisPoints: 750,
 };
+
+const CARD_CONTRACT = {
+  contractId: 'test-contract',
+  channel: ANY_CHANNEL,
+  effectiveFrom: new Date(0),
+} as const;
 
 describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run' }, () => {
   let pool: Pool;
@@ -107,7 +114,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
         asked === source
           ? {
               calendar: CALENDAR,
-              expectedFee: (gross: Money) => feeFor(CARD, gross, 'test-contract'),
+              expectedFee: (gross: Money) => feeFor(CARD, gross, CARD_CONTRACT),
               bankChargeAllowance: 10_000n,
             }
           : null) satisfies PolicyLookup,
@@ -120,6 +127,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
     source,
     filename: `${kind}.json`,
     byteLength: 12,
+    storageLocation: `s3://evidence/${id}`,
     receivedFrom: 'test-suite',
     receivedAt: ASOF,
     parserVersion: 'test/1',
@@ -133,6 +141,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
         source,
         gross: money(gross),
         status: 'SUCCESSFUL',
+        channel: 'card',
         occurredAt: PAID_AT,
         idempotencyKey: id,
       },
@@ -157,6 +166,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
       reportedAt: VALUE_DATE,
       valueDate: VALUE_DATE,
       evidenceId,
+      lineage: { rowNumber: 0, path: '$.data[0]' },
       idempotencyKey: `payout:${source}:${reference}`,
     };
   };
@@ -183,6 +193,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
     narrationTokens: narration.toUpperCase().match(/[A-Z0-9][A-Z0-9_-]{5,}/g) ?? [],
     statedReference: null,
     evidenceId,
+    lineage: { rowNumber: 2, path: '$[2]' },
     idempotencyKey: key,
   });
 
@@ -467,6 +478,8 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
       contractId: `${source}-published`,
       source,
       merchantId: MERCHANT,
+      channel: 'card',
+      currency: 'NGN',
       effectiveFrom: new Date(0),
       effectiveTo: boundary,
       rateCard: CARD,
@@ -490,10 +503,15 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
     assert.equal(contracts.length, 2);
 
     const model = feeModel(contracts);
-    assert.equal(model(money(1_000_000n), new Date('2026-03-15T10:00:00Z'))?.fee.kobo, 15_000n);
-    assert.equal(model(money(1_000_000n), new Date('2026-05-15T10:00:00Z'))?.fee.kobo, 10_000n);
+    const march = new Date('2026-03-15T10:00:00Z');
+    const may = new Date('2026-05-15T10:00:00Z');
+
+    assert.equal(model(money(1_000_000n), march, 'card')?.fee.kobo, 15_000n);
+    assert.equal(model(money(1_000_000n), may, 'card')?.fee.kobo, 10_000n);
     // VAT is its own number, bound for its own account.
-    assert.equal(model(money(1_000_000n), new Date('2026-05-15T10:00:00Z'))?.vat.kobo, 750n);
+    assert.equal(model(money(1_000_000n), may, 'card')?.vat.kobo, 750n);
+    // Neither contract was quoted for transfers, and neither is stretched to cover one.
+    assert.equal(model(money(1_000_000n), may, 'bank_transfer'), null);
   });
 
   /**
@@ -507,6 +525,8 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
       contractId: `${source}-a`,
       source,
       merchantId: MERCHANT,
+      channel: 'card',
+      currency: 'NGN',
       effectiveFrom: new Date('2026-01-01T00:00:00Z'),
       effectiveTo: new Date('2026-06-01T00:00:00Z'),
       rateCard: CARD,
@@ -538,10 +558,12 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
     await recordEvidence(pool, evidence(id('ev'), 'bank_statement', source), null);
 
     await recordResolution(pool, {
+      resolutionKey: id('res-1'),
       subject: 'bank_credit',
       subjectId: id('bank-99'),
       action: 'write_off',
       reason: 'Correspondent bank charge below the investigation threshold.',
+      amount: money(5_250n),
       resolvedBy: 'ops.amaka@example.com',
       resolvedAt: ASOF,
       evidenceId: id('ev'),
@@ -550,10 +572,12 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
     });
 
     await recordResolution(pool, {
+      resolutionKey: id('res-2'),
       subject: 'bank_credit',
       subjectId: id('bank-99'),
       action: 'reopened',
       reason: 'The bank refunded the charge after all.',
+      amount: null,
       resolvedBy: 'ops.amaka@example.com',
       resolvedAt: new Date('2026-08-14T09:00:00Z'),
       evidenceId: null,
@@ -563,7 +587,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
 
     const history = await resolutionsFor(pool, 'bank_credit', id('bank-99'));
     assert.deepEqual(
-      history.map((resolution) => [resolution.action, resolution.approvedBy]),
+      history.map((entry) => [entry.resolution.action, entry.resolution.approvedBy]),
       [
         ['write_off', 'controller.tunde@example.com'],
         ['reopened', null],
@@ -583,11 +607,284 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
     await assert.rejects(
       pool.query(
         `INSERT INTO resolutions
-                (subject, subject_id, action, reason, resolved_by, resolved_at, approved_by)
-         VALUES ('payout', $1, 'write_off', 'x', 'ops@example.com', now(), 'boss@example.com')`,
-        [id('half')],
+                (resolution_key, subject, subject_id, action, reason, resolved_by,
+                 resolved_at, approved_by)
+         VALUES ($1, 'payout', $2, 'write_off', 'x', 'ops@example.com', now(), 'boss@example.com')`,
+        [id('half-key'), id('half')],
       ),
       /resolutions_approval_complete/,
     );
+  });
+
+  // ── Maker-checker ─────────────────────────────────────────────────────────
+
+  /**
+   * The failure mode this exists for: the person who noticed a discrepancy is the person
+   * best placed to make it disappear. They are usually acting in good faith. A second named
+   * human is the cheapest control that tells the two cases apart.
+   */
+  test('a write-off without an approver is refused', async () => {
+    const { id } = scenario();
+
+    await assert.rejects(
+      recordResolution(pool, {
+        resolutionKey: id('unapproved'),
+        subject: 'payout',
+        subjectId: id('PO-X'),
+        action: 'write_off',
+        reason: 'It has been three months.',
+        amount: money(4_000_000n),
+        resolvedBy: 'ops.amaka@example.com',
+        resolvedAt: ASOF,
+        evidenceId: null,
+        approvedBy: null,
+        approvedAt: null,
+      }),
+      /requires an approver/,
+    );
+  });
+
+  /**
+   * One person named twice is one person. Refused by the application, and independently by
+   * a database constraint — because a control enforced in one layer is one refactor away
+   * from not existing.
+   */
+  test('nobody approves their own resolution, in either layer', async () => {
+    const { id } = scenario();
+    const selfApproved = {
+      resolutionKey: id('self'),
+      subject: 'payout' as const,
+      subjectId: id('PO-Y'),
+      action: 'write_off',
+      reason: 'Signed off by me, to me.',
+      amount: money(1_000n),
+      resolvedBy: 'ops.amaka@example.com',
+      resolvedAt: ASOF,
+      evidenceId: null,
+      approvedBy: 'ops.amaka@example.com',
+      approvedAt: ASOF,
+    };
+
+    await assert.rejects(recordResolution(pool, selfApproved), /cannot approve their own/);
+
+    // And again with the application walked past entirely.
+    await assert.rejects(
+      pool.query(
+        `INSERT INTO resolutions
+                (resolution_key, subject, subject_id, action, reason, resolved_by,
+                 resolved_at, approved_by, approved_at)
+         VALUES ($1, 'payout', $2, 'write_off', 'x', 'ops@example.com', now(),
+                 'ops@example.com', now())`,
+        [id('self-raw'), id('PO-Y')],
+      ),
+      /resolutions_no_self_approval/,
+    );
+  });
+
+  // ── Compensating entries ──────────────────────────────────────────────────
+
+  /**
+   * The ADR's own example. An operator finds the PSP's reserve notice and concludes that a
+   * ₦1,000 "fee" was a rolling reserve. The original booking is not touched — it recorded
+   * what we knew — and a second transaction moves the money to the account that describes
+   * it. An auditor sees the mistake and the correction, which is more than seeing neither.
+   */
+  test('a resolution posts its compensating entry, with the decision, in one write', async () => {
+    const { id } = scenario();
+
+    const recorded = await recordResolution(
+      pool,
+      {
+        resolutionKey: id('reclass'),
+        subject: 'payout',
+        subjectId: id('PO-Z'),
+        action: 'reclassify',
+        reason: 'PSP reserve notice: the ₦1,000 was a 90-day rolling reserve, not a fee.',
+        amount: money(100_000n),
+        resolvedBy: 'ops.amaka@example.com',
+        resolvedAt: ASOF,
+        evidenceId: null,
+        approvedBy: 'controller.tunde@example.com',
+        approvedAt: ASOF,
+      },
+      {
+        entries: [
+          { accountId: 'psp_reserve', amount: money(100_000n) },
+          { accountId: 'fees_expense', amount: money(-100_000n) },
+        ],
+      },
+    );
+
+    assert.equal(recorded.bookedTransactionId, `resolution:${id('reclass')}`);
+    assert.deepEqual(await entriesOf(`resolution:${id('reclass')}`), [
+      ['psp_reserve', 100_000n],
+      ['fees_expense', -100_000n],
+    ]);
+
+    // The decision and its booking are one write, and the resolution names the transaction.
+    const history = await resolutionsFor(pool, 'payout', id('PO-Z'));
+    assert.equal(history[0]!.bookedTransactionId, `resolution:${id('reclass')}`);
+
+    assert.deepEqual(await verifyBalances(pool), [], 'the cache drifted from the entries');
+    assert.equal((await verifyConservation(pool)).kobo, 0n, 'the books stopped balancing');
+  });
+
+  /**
+   * The three-way design in one refusal. An operator who believes the bank balance is wrong
+   * has found either a statement line we have not ingested, or a genuine bank error that
+   * comes back as a statement line. Neither is fixed by typing a number — and the moment
+   * this is allowed "once, carefully", cash stops meaning bank evidence.
+   */
+  test('no human decision may move the bank balance', async () => {
+    const { id } = scenario();
+
+    await assert.rejects(
+      recordResolution(
+        pool,
+        {
+          resolutionKey: id('cash'),
+          subject: 'bank_credit',
+          subjectId: id('bank-x'),
+          action: 'clear_phantom',
+          reason: 'I am sure the money is there.',
+          amount: money(500_000n),
+          resolvedBy: 'ops.amaka@example.com',
+          resolvedAt: ASOF,
+          evidenceId: null,
+          approvedBy: 'controller.tunde@example.com',
+          approvedAt: ASOF,
+        },
+        {
+          entries: [
+            { accountId: 'bank_account', amount: money(500_000n) },
+            { accountId: 'suspense', amount: money(-500_000n) },
+          ],
+        },
+      ),
+      /bank evidence/,
+    );
+
+    // Nothing was written: not the booking, and not the decision that justified it.
+    assert.equal(await getTransaction(pool, `resolution:${id('cash')}`), null);
+    assert.deepEqual(await resolutionsFor(pool, 'bank_credit', id('bank-x')), []);
+  });
+
+  /** A retried request appends one decision and books once (Law 4, on the human half). */
+  test('recording the same resolution twice books once', async () => {
+    const { id } = scenario();
+    const resolution = {
+      resolutionKey: id('retried'),
+      subject: 'payout' as const,
+      subjectId: id('PO-R'),
+      action: 'reclassify',
+      reason: 'Reserve, not fee.',
+      amount: money(20_000n),
+      resolvedBy: 'ops.amaka@example.com',
+      resolvedAt: ASOF,
+      evidenceId: null,
+      approvedBy: 'controller.tunde@example.com',
+      approvedAt: ASOF,
+    };
+    const entries = [
+      { accountId: 'psp_reserve' as const, amount: money(20_000n) },
+      { accountId: 'fees_expense' as const, amount: money(-20_000n) },
+    ];
+
+    const first = await recordResolution(pool, resolution, { entries });
+    const second = await recordResolution(pool, resolution, { entries });
+
+    assert.equal(second.bookedTransactionId, first.bookedTransactionId);
+    assert.equal((await resolutionsFor(pool, 'payout', id('PO-R'))).length, 1);
+    assert.equal((await entriesOf(`resolution:${id('retried')}`)).length, 2);
+  });
+
+  // ── What the decision was priced by ───────────────────────────────────────
+
+  /**
+   * A fee model is administered data that changes. Recomputing a March decision against
+   * today's contract table can reach a different answer than the one we acted on, so the
+   * contract that priced each promise is stored with the conclusion.
+   */
+  test('a match records the fee contract that explained it', async () => {
+    const { source, id, policy } = scenario();
+
+    await promise(source, id('pay-1'), 800_000n);
+    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null);
+    await recordPayouts(pool, [
+      payout(source, id('PO-2026-0010'), 800_000n, [deduction('fee', 12_000n)], id('ev')),
+    ]);
+    await reconcile(pool, { asOf: ASOF, policyFor: policy, limit: 50_000 });
+
+    const match = await matchOf(pool, `allocate:${id('PO-2026-0010')}`);
+    assert.deepEqual(match?.explainedBy, [
+      {
+        transactionId: id('pay-1'),
+        contractId: 'test-contract',
+        channel: '*',
+        expectedFee: money(12_000n),
+        expectedVat: money(900n),
+        observedFee: money(12_000n),
+      },
+    ]);
+  });
+
+  /**
+   * One batch fee across two payments. Stored rather than recomputed, because the
+   * apportionment rule is a choice and a stored answer stays reproducible after it changes.
+   */
+  test('an allocation carries its apportioned share of the deductions', async () => {
+    const { source, id, policy } = scenario();
+
+    await promise(source, id('pay-1'), 900_000n);
+    await promise(source, id('pay-2'), 2_100_000n);
+    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null);
+    await recordPayouts(pool, [
+      payout(source, id('PO-2026-0011'), 3_000_000n, [deduction('fee', 45_000n)], id('ev')),
+    ]);
+    await reconcile(pool, { asOf: ASOF, policyFor: policy, limit: 50_000 });
+
+    const allocations = await allocationsOf(pool, id('PO-2026-0011'));
+    assert.deepEqual(
+      allocations.map((allocation) => [
+        allocation.transactionId,
+        allocation.amount.kobo,
+        allocation.net.kobo,
+        allocation.deductions.map((d) => [d.accountId, d.amount.kobo]),
+      ]),
+      [
+        [id('pay-1'), 900_000n, 886_500n, [['fees_expense', 13_500n]]],
+        [id('pay-2'), 2_100_000n, 2_068_500n, [['fees_expense', 31_500n]]],
+      ],
+    );
+  });
+
+  // ── Lineage ───────────────────────────────────────────────────────────────
+
+  /**
+   * "Which file?" was answerable before; "which line of it?" was not. In a five-thousand-row
+   * export those are different questions, and only the second lets somebody reproduce a
+   * conclusion without reading the whole file.
+   */
+  test('a record traces to a row of a file, not merely to the file', async () => {
+    const { source, id } = scenario();
+    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), Buffer.from('{}'));
+    await recordPayouts(pool, [
+      payout(source, id('PO-2026-0012'), 500_000n, [], id('ev')),
+    ]);
+
+    const stored = await pool.query<{
+      source_row_number: number;
+      source_path: string;
+      storage_location: string;
+    }>(
+      `SELECT p.source_row_number, p.source_path, e.storage_location
+         FROM payouts p JOIN evidence e ON e.evidence_id = p.evidence_id
+        WHERE p.payout_reference = $1`,
+      [id('PO-2026-0012')],
+    );
+
+    assert.equal(stored.rows[0]!.source_row_number, 0);
+    assert.equal(stored.rows[0]!.source_path, '$.data[0]');
+    assert.equal(stored.rows[0]!.storage_location, `s3://evidence/${id('ev')}`);
   });
 });

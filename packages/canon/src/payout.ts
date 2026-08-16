@@ -23,6 +23,7 @@
  */
 
 import type { AccountId } from './accounts.js';
+import type { RowLineage } from './evidence.js';
 import type { IdempotencyKey, PayoutReference, SourceId } from './identifiers.js';
 import type { Money } from './money.js';
 import { add, subtract, sum, ZERO } from './money.js';
@@ -119,6 +120,8 @@ export interface Payout {
 
   /** The file this came out of — see `Evidence`. Every payout is traceable to bytes. */
   readonly evidenceId: string;
+  /** …and to the row of that file, which is what "traceable" means in a file of five thousand. */
+  readonly lineage: RowLineage;
   readonly idempotencyKey: IdempotencyKey;
 }
 

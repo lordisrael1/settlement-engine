@@ -28,12 +28,13 @@
  *   minutes.
  *
  * Read the files in this order:
- *   policy.ts   what the matcher is told about a source
- *   inflow.ts   the money we have been told to expect, however the source phrased it
- *   subset.ts   the batching engine, and why it refuses to guess
- *   match.ts    the two stages themselves
- *   store.ts    where the three records, the evidence and the conclusions live
- *   run.ts      loading, matching, booking
+ *   policy.ts     what the matcher is told about a source
+ *   inflow.ts     the money we have been told to expect, however the source phrased it
+ *   apportion.ts  how one batch deduction is split across the payments it was charged on
+ *   subset.ts     the batching engine, and why it refuses to guess
+ *   match.ts      the two stages themselves
+ *   store.ts      where the three records, the evidence and the conclusions live
+ *   run.ts        loading, matching, booking
  */
 
 export {
@@ -57,9 +58,18 @@ export {
   inflowFromPayout,
   inflowShortfall,
   totalDeductions,
+  withApportionment,
+  type AllocationDraft,
   type ExpectedInflow,
   type InflowAllocation,
 } from './inflow.js';
+
+export {
+  apportion,
+  apportionDeductions,
+  type AllocationBreakdown,
+  type Apportionable,
+} from './apportion.js';
 
 export {
   UNPROFILED_SOURCE,
@@ -96,6 +106,8 @@ export {
   recordResolution,
   resolutionsFor,
   matchOf,
+  UnapprovedResolutionError,
+  type ResolutionOptions,
   type Stored,
 } from './store.js';
 

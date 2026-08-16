@@ -723,3 +723,180 @@ explain it, previously had to masquerade as a phantom credit plus a missing sett
 
 The grouping lives in `canon` because it is a statement about what a code *means*, and a
 second copy of it in the matcher could disagree with this one.
+
+---
+
+## D-037 · 2026-08-16 · Fee contracts are scoped by channel and currency, and specificity breaks the one allowed overlap
+
+**Decision.** A `FeeContract`'s scope is `(source, merchantId, channel, currency)`. `channel`
+is a value, not a nullable field, and `'*'` means a blended contract covering every channel.
+The exclusion constraint forbids overlap *within* a scope; a channel-specific contract
+beside a `'*'` one is a deliberate overlap resolved by `contractAt` in favour of the more
+specific.
+
+**Why.** Nigerian PSPs price a bank transfer at ten naira flat and a card at 1.5% capped.
+One rate per merchant predicts ₦7,500 on a ₦500,000 transfer that actually cost ₦10. That
+never produces a wrong balance — the fee charged always wins — but it produces a
+`FEE_VARIANCE` on every transfer for ever, which is an exception queue nobody reads, which
+is the same as having no fee model at all, only noisier.
+
+Currency is in the scope for the same reason at a larger scale: a rate quoted in naira says
+nothing about a payment in dollars, and stretching it to cover one would invent a variance
+denominated in a currency the contract never mentioned.
+
+**On `'*'` rather than `NULL`.** A nullable wildcard reads as a bug the first time somebody
+adds a channel-specific contract beside it, and an exclusion constraint cannot express
+"overlaps unless one side is a wildcard" anyway. Making it a value keeps the constraint
+exact and states the precedence rule in exactly one place.
+
+**On the unknown channel.** `'unknown'` is a legitimate value — several sources do not
+disclose the rail, and a payout report names a movement rather than a channel. It finds a
+blended contract or nothing. It is never silently priced as a card, which would be inferring
+a rate from an absence.
+
+**Cost accepted.** Two seeded contracts per source instead of one, and a channel that has to
+travel with the payment — hence `ledger_transactions.channel`, which is descriptive metadata
+about the causing event exactly as `source` and `reference` already are. USSD and POS
+collections are left unpriced on purpose rather than given a made-up card rate.
+
+---
+
+## D-038 · 2026-08-16 · Calendars name a time zone; holiday tables are versioned and their coverage is explicit
+
+**Decision.** `BusinessCalendar` carries `timeZone` (IANA) and `cutOffMinutes` in *local*
+time, replacing `cutOffMinutesUtc`. Holidays arrive as `HolidayCalendar` editions with a
+`calendarId`, a `revision` and explicit coverage bounds; the highest revision covering a day
+wins, and `isCovered` answers whether we hold any table at all.
+
+**Why.** The old model got Nigeria right by hand-arithmetic — WAT is UTC+1 with no daylight
+saving, so a 5pm cut-off was `16 * 60` and a human had done the subtraction. That is correct
+until the first rail in a zone that observes daylight saving, where it is wrong for half the
+year, silently, in the direction of false alerts. A cut-off is a wall-clock time in a named
+place; the conversion belongs to the platform's IANA data, not to a subtraction somebody
+remembered to do.
+
+**On revisions.** Eid al-Fitr and Eid al-Adha are lunar and are announced by the federal
+government days beforehand, often with an extra day declared beside them. The table for a
+year genuinely changes *during* that year. Without a revision, a run before the correction
+and a replay after it disagree about whether a payment was late and nothing in the record
+says why — Law 5 failing quietly. With one, the correction is a citable fact and the
+superseded edition still exists to explain what it decided. `deadlineProvenance` returns the
+editions consulted, so a conclusion can name them.
+
+**On coverage.** A year we hold no table for is not a year with no holidays. The deadline
+still computes — a missing table can only make a settlement that was never late look late,
+which is mild and visible — but the gap is askable rather than silent.
+
+**Cost accepted.** `Intl.DateTimeFormat` on the path, cached per zone; a two-pass offset
+resolution for the wall-clock-to-instant direction; and holiday tables somebody maintains
+per jurisdiction and year.
+
+---
+
+## D-039 · 2026-08-16 · A canonical record traces to a row, and evidence carries a storage locator
+
+**Decision.** Every canonical record carries `lineage: { rowNumber, path }` beside its
+`evidenceId`, recorded by the parser. `Evidence` gains `storageLocation`.
+
+**Why.** "Which file?" was already answerable. In a five-thousand-row export that is not the
+question — reproducing a conclusion means finding the row again, and "somewhere in this
+file" is not finding it. The path is a locator in the artifact's own idiom (`$[3]`,
+`$.data[3]`), because a locator that names the wrong container is worse than none.
+
+`storageLocation` exists for the deployment `evidence.raw` cannot serve: statements run to
+hundreds of megabytes and retention policy eventually says delete the payload and keep the
+record. When `raw` is truncated it is the only thing between a hash and an unanswerable
+question. It is recorded at ingest and never resolved there, which keeps the ingest layer
+free of a network.
+
+**Cost accepted.** Three more columns on three tables, and a parser that has to count.
+
+---
+
+## D-040 · 2026-08-16 · Batch deductions are apportioned pro rata by gross, by largest remainder, ties broken by transaction id
+
+**Decision.** Each allocation stores its share of every deduction and the resulting net. The
+rule is pro rata by gross allocated, resolved by largest remainder, with equal remainders
+broken by transaction id, applied per account independently.
+
+**Why the question has to be answered at all.** Gross allocation says which receivables a
+payout closed. It does not say what *this* payment cost — the number behind per-payment
+margin, per-merchant profitability, and every fee dispute anyone has ever had with a PSP.
+
+**Why this rule.** Pro rata by gross, because Nigerian PSP pricing is overwhelmingly
+percentage-driven and a payment twice the size did attract roughly twice the fee. Largest
+remainder, because integer kobo do not divide evenly and the shares must add back to the
+total *exactly*: a rounding rule that loses a kobo makes the apportioned deductions disagree
+with the deduction actually booked, which is a plug entry arriving one kobo at a time. Ties
+by transaction id, because somebody has to get the spare kobo and "whichever the map
+iterated first" is not reproducible (Law 5). Per account independently, because apportioning
+the aggregate and splitting it afterwards rounds twice and reconciles to neither.
+
+**What it is not.** It is not a claim about what the PSP would have charged had each payment
+settled alone — a flat component or a cap makes that a different number. It is a defensible
+split of a real charge, recorded with the rule that produced it.
+
+**Why stored rather than recomputed.** The rule is a choice, and choices change. A stored
+answer stays reproducible after the choice changes; a derived one silently becomes a
+different answer.
+
+**One deliberate limit.** Only the PSP’s deductions are apportioned. A correspondent-bank
+charge is discovered at stage three, is levied on the credit rather than on any payment, and
+arrives after the allocations are written — which are append-only. It books to
+`bank_charges` on the confirming transaction and is visible there; it is not attributed to
+individual payments, because nothing in the evidence says which payment attracted it.
+
+---
+
+## D-041 · 2026-08-16 · The contract that explained a decision is stored with the decision
+
+**Decision.** `MatchResult.explainedBy` carries one `FeeExplanation` per promise — contract
+id, scope, expected fee, expected VAT, observed fee — and `matches.fee_explanations`
+persists it.
+
+**Why.** Effective-dated contracts make March reconcile at March's rates. They do not, on
+their own, make a March *decision* reproducible: rates are renegotiated, scopes are added,
+and a rate card typo gets corrected. Recomputing an old conclusion against today's table can
+therefore reach a different answer than the one we acted on — the exact failure the dating
+was meant to prevent, moved one level up. So the answer is written down at the moment we
+act, and "why did we accept a ₦165 fee in March?" is answered by a stored contract id rather
+than by a re-derivation that may no longer reproduce.
+
+**On nulls.** `contractId: null` records "we matched this on amounts alone", which is a
+conclusion. A conclusion left unwritten is indistinguishable later from one nobody reached.
+
+---
+
+## D-042 · 2026-08-16 · A resolution is keyed, valued, maker-checked, and may post a compensating entry — never to `bank_account`
+
+**Decision.** `Resolution` gains `resolutionKey` (its natural key, and the id of the
+transaction it posts) and `amount`. `recordResolution` enforces an `ApprovalPolicy`, posts
+the compensating journal in the same database transaction as the decision, and refuses any
+entry touching `bank_account`. Self-approval is refused by the application *and* by a
+database constraint.
+
+**Why maker-checker.** The person who noticed a discrepancy is the person best placed to
+make it disappear. They are usually acting in good faith and occasionally they are not, and
+a second *named* person is the cheapest control that distinguishes the two — costing nothing
+on the decisions that do not need it. `approveAnyBooking` means anything that moves value
+needs one, whatever its size.
+
+**Why the entry and the decision are one write.** A compensating entry whose justification
+failed to save is money moved for no recorded reason, which is indistinguishable from money
+moved for no reason.
+
+**Why `bank_account` is forbidden.** This is the three-way design in one refusal. Cash moves
+on bank evidence, and a human's conclusion is not bank evidence. An operator who believes
+the bank balance is wrong has found either a statement line we have not ingested — in which
+case ingest it — or a genuine bank error, which is resolved with the bank and arrives back
+as a statement line. Neither is fixed by typing a number, and the moment this is allowed
+"once, carefully", the whole three-way model is decoration.
+
+**On correcting rather than editing.** A reclassification does not touch the original
+booking. That booking recorded what we knew; that we were wrong about it is a second fact,
+not a reason to erase the first. An auditor sees the mistake and the correction, which is
+strictly more than seeing neither.
+
+**Cost accepted.** Identities, permissions and an approval UI, which remain Phase 6's
+problem. The rule, the key and the posting path exist now so that Phase 4's exception queue
+has somewhere honest to write.

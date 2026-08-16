@@ -52,6 +52,9 @@ export const flutterwaveSettlements: SettlementSource = {
       parsed.rows,
       (txn) => ({ as: 'payout', adjustments: flutterwaveDeductions(txn) }),
       context,
+      // The rows live under the envelope's `data` array, so that is where a reader looking
+      // for row 3 has to look. A locator that names the wrong container is worse than none.
+      '$.data',
     );
   },
 };
@@ -206,6 +209,8 @@ function ingestRowArray(
     json.value.map(parseRow),
     asLine,
     context,
+    // A bare array: row 3 is `$[3]`.
+    '$',
   );
 }
 

@@ -1,5 +1,5 @@
-import type { BankStatementLine, Evidence, SourceId } from '@recon/canon';
-import { idempotencyKey, money } from '@recon/canon';
+import type { BankStatementLine, Evidence, RowLineage, SourceId } from '@recon/canon';
+import { arrayLineage, idempotencyKey, money } from '@recon/canon';
 
 import { evidenceOf, type EvidenceContext } from './evidence.js';
 import type { RejectedRow } from './settlement/types.js';
@@ -111,8 +111,8 @@ export function ingestBankStatement(
   const lines: BankStatementLine[] = [];
   const rejected: RejectedRow[] = [];
 
-  for (const raw of parsed as RawStatementRow[]) {
-    const line = toStatementLine(raw, context, evidence.evidenceId);
+  for (const [index, raw] of (parsed as RawStatementRow[]).entries()) {
+    const line = toStatementLine(raw, context, evidence.evidenceId, arrayLineage(index));
     if (line.ok) lines.push(line.line);
     else rejected.push(line.rejected);
   }
@@ -124,6 +124,7 @@ function toStatementLine(
   raw: RawStatementRow,
   context: BankStatementContext,
   evidenceId: string,
+  lineage: RowLineage,
 ): { ok: true; line: BankStatementLine } | { ok: false; rejected: RejectedRow } {
   const reject = (reason: string): { ok: false; rejected: RejectedRow } => ({
     ok: false,
@@ -165,6 +166,7 @@ function toStatementLine(
       statedReference:
         typeof raw.reference === 'string' && raw.reference !== '' ? raw.reference : null,
       evidenceId,
+      lineage,
       idempotencyKey: idempotencyKey('bank', `${context.bank}:${reference}`),
     },
   };

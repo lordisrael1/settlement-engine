@@ -14,8 +14,9 @@
  *   settlement.ts   record two — one payment inside a PSP's payout report
  *   payout.ts       …and the payout itself, with its named deductions
  *   bank.ts         record three — the bank statement, the only proof of cash
+ *   zone.ts         wall-clock time in a named place
  *   calendar.ts     when money is actually late, in business days
- *   fees.ts         what we expected to be charged, per contract, per date
+ *   fees.ts         what we expected to be charged, per contract, channel and date
  *   evidence.ts     the documents we reasoned from, and the humans who decided
  *   matching.ts     what reconciliation concluded, and why
  */
@@ -28,6 +29,7 @@ export * from './payment.js';
 export * from './settlement.js';
 export * from './payout.js';
 export * from './bank.js';
+export * from './zone.js';
 export * from './calendar.js';
 export * from './fees.js';
 export * from './evidence.js';

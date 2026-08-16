@@ -66,7 +66,10 @@ export {
 
 export {
   calendar,
-  NIGERIA_HOLIDAYS_2026,
+  LAGOS,
+  NIGERIA_2025,
+  NIGERIA_2026,
+  NIGERIA_HOLIDAYS,
   CUT_OFF_5PM_WAT,
   CUT_OFF_10PM_WAT,
   ONE_DAY_GRACE,
@@ -76,8 +79,11 @@ export {
 export {
   publishedContract,
   PAYSTACK_PUBLISHED_NGN,
+  PAYSTACK_TRANSFER_NGN,
   FLUTTERWAVE_PUBLISHED_NGN,
+  FLUTTERWAVE_TRANSFER_NGN,
   MONNIFY_PUBLISHED_NGN,
+  MONNIFY_TRANSFER_NGN,
 } from './fees.js';
 
 export { evidenceOf, sha256, type EvidenceContext } from './evidence.js';

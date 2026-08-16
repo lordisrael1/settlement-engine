@@ -6,7 +6,9 @@
  * "no silent discrepancies" means.
  */
 
+import type { ChannelScope } from './fees.js';
 import type { IdempotencyKey, PayoutReference, TransactionId } from './identifiers.js';
+import type { Money } from './money.js';
 
 export const REASON_CODES = [
   // Matches — the difference is fully accounted for.
@@ -118,6 +120,33 @@ export function reasonKind(reason: ReasonCode): ReasonKind {
 export type Confidence = number;
 
 /**
+ * Which fee contract explained one promise inside a conclusion, and what it predicted.
+ *
+ * A fee model is administered data that changes: rates are renegotiated, a channel-specific
+ * contract is added, a typo in a rate card is corrected. Recomputing an old decision
+ * against today's table can therefore reach a different answer than the one we acted on —
+ * so the answer we acted on is written down at the moment we act, and "why did we accept a
+ * ₦165 fee in March?" is answered by a stored contract id rather than by a re-derivation
+ * that may no longer reproduce.
+ *
+ * Every field is nullable for the same honest reason: a payout report names a movement,
+ * not a rail, and a source we hold no contract for predicts nothing. `contractId: null`
+ * says "we matched this on amounts alone", which is a conclusion worth recording as
+ * explicitly as any other.
+ */
+export interface FeeExplanation {
+  readonly transactionId: TransactionId;
+  /** The contract version that priced it, or `null` when none covered the payment. */
+  readonly contractId: string | null;
+  /** The scope that contract was quoted for — a channel, or `'*'` for a blended rate. */
+  readonly channel: ChannelScope | null;
+  readonly expectedFee: Money | null;
+  readonly expectedVat: Money | null;
+  /** What the source actually charged, where the source said. */
+  readonly observedFee: Money | null;
+}
+
+/**
  * One conclusion of the matching pipeline: these ledger transactions correspond to
  * these settlement lines, for this reason.
  *
@@ -132,14 +161,23 @@ export interface MatchResult {
   readonly payoutReferences: readonly PayoutReference[];
   /** The bank credits that confirmed it. Empty until the bank has spoken. */
   readonly bankCreditKeys: readonly IdempotencyKey[];
+  /**
+   * The fee contracts that explained this, one per promise the conclusion priced.
+   *
+   * Empty where no pricing was involved at all — a pending promise, an unidentified
+   * credit. Present and contract-less where pricing was attempted and no contract covered
+   * it, which is a different thing and is recorded as one.
+   */
+  readonly explainedBy: readonly FeeExplanation[];
   readonly reason: ReasonCode;
   readonly confidence: Confidence;
 }
 
-/** An empty result to spread over — four link lists is three too many to retype. */
+/** An empty result to spread over — five list fields is four too many to retype. */
 export const NO_LINKS = {
   transactionIds: [] as readonly TransactionId[],
   settlementKeys: [] as readonly IdempotencyKey[],
   payoutReferences: [] as readonly PayoutReference[],
   bankCreditKeys: [] as readonly IdempotencyKey[],
+  explainedBy: [] as readonly FeeExplanation[],
 } as const;

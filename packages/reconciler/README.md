@@ -71,19 +71,19 @@ contracts in the database and hands over a lookup.
 
 | Table | Holds |
 |---|---|
-| `evidence` | every file, content-addressed by SHA-256, with uploader and parser version |
-| `fee_contracts` | versioned rate cards, non-overlapping by exclusion constraint |
+| `evidence` | every file, content-addressed by SHA-256, with uploader, parser version and storage locator |
+| `fee_contracts` | rate cards scoped by merchant, source, channel and currency, non-overlapping within a scope by exclusion constraint |
 | `payouts` | what each PSP says it is sending, with itemised deductions |
 | `settlement_lines` | individual settled payments, for sources that list them |
 | `bank_statement_lines` | the only evidence that can book cash |
 | `expected_inflows` | reported and not yet confirmed — neither matched nor missing |
-| `inflow_allocations` | how much of each payment an inflow discharges |
-| `matches` | every conclusion, and what it booked (usually nothing) |
-| `resolutions` | appended human decisions, with identity and approver |
+| `inflow_allocations` | how much of each payment an inflow discharges, and its apportioned share of the deductions |
+| `matches` | every conclusion, what it booked (usually nothing), and the fee contract that explained it |
+| `resolutions` | appended human decisions, with identity, approver, value and any compensating transaction |
 
-All append-only. Two invariants live in the database rather than in code: a payment can
-never be allocated beyond its receivable, and one bank credit can confirm at most one
-inflow.
+All append-only. Three invariants live in the database rather than in code: a payment can
+never be allocated beyond its receivable, one bank credit can confirm at most one inflow,
+and nobody approves their own resolution.
 
 ## The exception state machine (Phase 4)
 

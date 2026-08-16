@@ -12,6 +12,7 @@
  * says so, and every one of them is a real Tuesday.
  */
 
+import type { RowLineage } from './evidence.js';
 import type { IdempotencyKey, PayoutReference, Reference } from './identifiers.js';
 import type { Money } from './money.js';
 
@@ -56,6 +57,8 @@ export interface BankStatementLine {
   readonly statedReference: PayoutReference | null;
 
   readonly evidenceId: string;
+  /** Which row of the statement. The answer to "show me that credit" is a line, not a file. */
+  readonly lineage: RowLineage;
   readonly idempotencyKey: IdempotencyKey;
 }
 

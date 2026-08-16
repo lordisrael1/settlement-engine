@@ -6,34 +6,76 @@
  * is will raise an exception every single weekend until the people reading the queue stop
  * reading the queue. An alert that cries wolf is worse than no alert at all.
  *
- * Four things decide the real deadline, and all four are per-source data:
+ * Five things decide the real deadline, and all five are per-source data:
  *
+ *   the zone         a cut-off is a *local* time, in a named place
  *   the cut-off      a payment after it belongs to the next business day
  *   business days    weekends are not settlement days
- *   holidays         and neither is a public holiday
+ *   holidays         and neither is a public holiday, per a versioned calendar
  *   grace            slack before silence becomes somebody's problem
+ *
+ * The zone and the calendar version are the two that this file gained after the first
+ * implementation, and both for the same reason: a deadline computed from `UTC+1 baked into
+ * a constant` and `whatever holidays the code happened to list` is reproducible only by
+ * accident. A reconciliation of March, re-run in December, must reach March's answer using
+ * March's holiday table — the same discipline `fees.ts` applies to rates, applied to time.
  *
  * Everything here is pure arithmetic on arguments. Nothing reads a clock, so a run in
  * March and a replay of it in December agree about what was late (Law 5).
  */
 
+import type { CalendarDate, TimeZoneName } from './zone.js';
+import { addDays, dayOfWeek, instantAt, zonedCalendarDate, zonedDateTime } from './zone.js';
+
 /** `0` is Sunday, matching `Date.prototype.getUTCDay`. */
 export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 
-/** A calendar date with no time and no zone: `YYYY-MM-DD`. */
-export type CalendarDate = string;
+/**
+ * A published list of public holidays, for a jurisdiction, for a period, at a revision.
+ *
+ * Two of Nigeria's holidays move: Eid al-Fitr and Eid al-Adha follow the lunar calendar
+ * and are announced by the federal government, sometimes days beforehand, and an extra day
+ * is routinely declared beside them. So the table is *revised*, in the middle of the year
+ * it describes — and a reconciliation run before the revision and a replay run after it
+ * would silently disagree about whether a payment was late, unless the revision is a fact
+ * with a name.
+ *
+ * `revision` is what makes that fact citable. The highest revision covering a day wins, so
+ * a correction supersedes rather than merging, and an exception can be traced to the
+ * edition of the calendar that produced it.
+ */
+export interface HolidayCalendar {
+  /** The jurisdiction and period this covers: `'NG-2026'`. */
+  readonly calendarId: string;
+  /** Monotonic. A later revision of the same period supersedes an earlier one. */
+  readonly revision: number;
+  readonly revisedAt: Date;
+  /** Inclusive bounds of what this edition claims to know about. */
+  readonly coversFrom: CalendarDate;
+  readonly coversTo: CalendarDate;
+  /** Local dates, in the calendar's own jurisdiction. Not business days. */
+  readonly days: readonly CalendarDate[];
+}
 
 export interface BusinessCalendar {
+  /** The zone the source's cut-off is quoted in: `'Africa/Lagos'`. */
+  readonly timeZone: TimeZoneName;
   /**
-   * Minutes past midnight UTC after which a payment is treated as the next business day's
-   * business. Nigerian PSPs quote these in WAT (UTC+1), so a 5pm cut-off is `960`.
+   * Minutes past *local* midnight after which a payment is treated as the next business
+   * day's business. A 5pm WAT cut-off is `1020`, and it stays `1020` whatever the zone's
+   * offset does — which is the whole reason this is no longer expressed in UTC.
    */
-  readonly cutOffMinutesUtc: number;
+  readonly cutOffMinutes: number;
   /** Business days from the effective day to the expected payout. T+1 is `1`. */
   readonly settlementBusinessDays: number;
   readonly weekend: readonly Weekday[];
-  /** Public holidays, as `YYYY-MM-DD`. Not business days even when midweek. */
-  readonly holidays: readonly CalendarDate[];
+  /**
+   * Every edition of every holiday table this source's deadlines are computed against.
+   *
+   * A list rather than a set of dates, so that 2025 and 2026 can both be present and so
+   * that a revised 2026 can supersede the original without deleting it.
+   */
+  readonly holidayCalendars: readonly HolidayCalendar[];
   /**
    * Slack after the deadline before an unmatched promise escalates.
    *
@@ -44,17 +86,57 @@ export interface BusinessCalendar {
   readonly graceMinutes: number;
 }
 
-const MINUTES = 60_000;
-const DAY = 24 * 60 * MINUTES;
+const MINUTE = 60_000;
 
-export function toCalendarDate(instant: Date): CalendarDate {
-  return instant.toISOString().slice(0, 10);
+/** The local date, in the calendar's own zone, at an instant. */
+export function localDay(calendar: BusinessCalendar, instant: Date): CalendarDate {
+  return zonedCalendarDate(instant, calendar.timeZone);
 }
 
-export function isBusinessDay(calendar: BusinessCalendar, day: Date): boolean {
-  const weekday = day.getUTCDay() as Weekday;
-  if (calendar.weekend.includes(weekday)) return false;
-  return !calendar.holidays.includes(toCalendarDate(day));
+/**
+ * The edition of the holiday table that governs this day, or `null` if none covers it.
+ *
+ * Highest revision wins, and the id breaks ties so that two editions loaded in a different
+ * order still produce the same answer (Law 5 reaches even here).
+ */
+export function holidayCalendarFor(
+  calendar: BusinessCalendar,
+  day: CalendarDate,
+): HolidayCalendar | null {
+  const covering = calendar.holidayCalendars.filter(
+    (edition) => edition.coversFrom <= day && day <= edition.coversTo,
+  );
+  if (covering.length === 0) return null;
+
+  return covering.reduce((best, candidate) =>
+    candidate.revision > best.revision ||
+    (candidate.revision === best.revision && candidate.calendarId > best.calendarId)
+      ? candidate
+      : best,
+  );
+}
+
+/**
+ * Whether we hold *any* holiday table for this day.
+ *
+ * Worth asking separately, because the answer to "is this a business day?" for an
+ * uncovered day is "as far as we know, yes" — which is a guess, not knowledge. An
+ * uncovered day cannot make the system book wrong money; it can only make a settlement
+ * that was never late look late, or the reverse. That is a mild, visible failure, and
+ * exposing the predicate lets an operator see it coming rather than discovering it as a
+ * mysterious January of false alerts.
+ */
+export function isCovered(calendar: BusinessCalendar, day: CalendarDate): boolean {
+  return holidayCalendarFor(calendar, day) !== null;
+}
+
+export function isHoliday(calendar: BusinessCalendar, day: CalendarDate): boolean {
+  return holidayCalendarFor(calendar, day)?.days.includes(day) ?? false;
+}
+
+export function isBusinessDay(calendar: BusinessCalendar, day: CalendarDate): boolean {
+  if (calendar.weekend.includes(dayOfWeek(day) as Weekday)) return false;
+  return !isHoliday(calendar, day);
 }
 
 /**
@@ -62,30 +144,31 @@ export function isBusinessDay(calendar: BusinessCalendar, day: Date): boolean {
  *
  * A payment after the cut-off has missed today's batch, and one taken on a Sunday was
  * never going to be in a batch at all — both start counting from the next day the source
- * actually settles on.
+ * actually settles on. Both comparisons are made against the wall clock in the source's own
+ * zone, because that is the clock the source's batch runs on.
  */
-export function effectiveBusinessDay(calendar: BusinessCalendar, occurredAt: Date): Date {
-  const midnight = new Date(Date.UTC(
-    occurredAt.getUTCFullYear(),
-    occurredAt.getUTCMonth(),
-    occurredAt.getUTCDate(),
-  ));
-
-  const minutesOfDay = (occurredAt.getTime() - midnight.getTime()) / MINUTES;
-  const start = minutesOfDay >= calendar.cutOffMinutesUtc
-    ? new Date(midnight.getTime() + DAY)
-    : midnight;
+export function effectiveBusinessDay(
+  calendar: BusinessCalendar,
+  occurredAt: Date,
+): CalendarDate {
+  const local = zonedDateTime(occurredAt, calendar.timeZone);
+  const sameDay = localDay(calendar, occurredAt);
+  const start =
+    local.minutesOfDay >= calendar.cutOffMinutes ? addDays(sameDay, 1) : sameDay;
 
   return isBusinessDay(calendar, start) ? start : nextBusinessDay(calendar, start);
 }
 
-export function nextBusinessDay(calendar: BusinessCalendar, day: Date): Date {
+export function nextBusinessDay(
+  calendar: BusinessCalendar,
+  day: CalendarDate,
+): CalendarDate {
   // Bounded so a calendar that accidentally declares every day a holiday fails loudly
   // instead of looping forever.
-  let candidate = new Date(day.getTime() + DAY);
+  let candidate = addDays(day, 1);
   for (let step = 0; step < 400; step += 1) {
     if (isBusinessDay(calendar, candidate)) return candidate;
-    candidate = new Date(candidate.getTime() + DAY);
+    candidate = addDays(candidate, 1);
   }
   throw new Error(
     'No business day found within a year. Check the calendar: its weekend and holiday ' +
@@ -95,9 +178,9 @@ export function nextBusinessDay(calendar: BusinessCalendar, day: Date): Date {
 
 export function addBusinessDays(
   calendar: BusinessCalendar,
-  day: Date,
+  day: CalendarDate,
   count: number,
-): Date {
+): CalendarDate {
   let result = day;
   for (let step = 0; step < count; step += 1) result = nextBusinessDay(calendar, result);
   return result;
@@ -105,7 +188,7 @@ export function addBusinessDays(
 
 /**
  * When the money was due: the cut-off time on the Nth business day after the payment's
- * effective day.
+ * effective day, resolved back into an instant through the source's own zone.
  *
  * Due, not late — `isOverdue` adds the grace period on top, because those are two
  * different questions and conflating them is what makes an exception queue useless.
@@ -116,7 +199,7 @@ export function settlementDeadline(calendar: BusinessCalendar, occurredAt: Date)
     effectiveBusinessDay(calendar, occurredAt),
     calendar.settlementBusinessDays,
   );
-  return new Date(due.getTime() + calendar.cutOffMinutesUtc * MINUTES);
+  return instantAt(calendar.timeZone, due, calendar.cutOffMinutes);
 }
 
 /** True once the deadline *and* the grace period have both passed. */
@@ -126,6 +209,43 @@ export function isOverdue(
   asOf: Date,
 ): boolean {
   const escalatesAt =
-    settlementDeadline(calendar, occurredAt).getTime() + calendar.graceMinutes * MINUTES;
+    settlementDeadline(calendar, occurredAt).getTime() + calendar.graceMinutes * MINUTE;
   return asOf.getTime() > escalatesAt;
+}
+
+/**
+ * Which holiday editions a deadline calculation actually consulted.
+ *
+ * The answer to "why did we think this was due on Tuesday?" is the calendar's zone, its
+ * cut-off, and *this* — the named, revisioned tables that said Monday was not a business
+ * day. Returned rather than logged, so the caller can persist it beside the conclusion.
+ */
+export function deadlineProvenance(
+  calendar: BusinessCalendar,
+  occurredAt: Date,
+): {
+  readonly effectiveDay: CalendarDate;
+  readonly dueDay: CalendarDate;
+  readonly deadline: Date;
+  readonly editions: readonly string[];
+  readonly fullyCovered: boolean;
+} {
+  const effectiveDay = effectiveBusinessDay(calendar, occurredAt);
+  const dueDay = addBusinessDays(calendar, effectiveDay, calendar.settlementBusinessDays);
+
+  const editions = new Set<string>();
+  let fullyCovered = true;
+  for (let day = localDay(calendar, occurredAt); day <= dueDay; day = addDays(day, 1)) {
+    const edition = holidayCalendarFor(calendar, day);
+    if (edition) editions.add(`${edition.calendarId}@${edition.revision}`);
+    else fullyCovered = false;
+  }
+
+  return {
+    effectiveDay,
+    dueDay,
+    deadline: instantAt(calendar.timeZone, dueDay, calendar.cutOffMinutes),
+    editions: [...editions].sort(),
+    fullyCovered,
+  };
 }

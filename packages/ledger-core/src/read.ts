@@ -1,6 +1,7 @@
 import type {
   AccountId,
   LedgerTransaction,
+  PaymentChannel,
   Reference,
   SourceId,
   TransactionId,
@@ -16,6 +17,7 @@ interface TransactionRow {
   reference: string;
   occurred_at: Date;
   recorded_at: Date;
+  channel: PaymentChannel | null;
   state: TransactionState;
 }
 
@@ -33,7 +35,8 @@ export async function getTransaction(
   transactionId: TransactionId,
 ): Promise<LedgerTransaction | null> {
   const header = await db.query<TransactionRow>(
-    `SELECT t.transaction_id, t.source, t.reference, t.occurred_at, t.recorded_at, s.state
+    `SELECT t.transaction_id, t.source, t.reference, t.occurred_at, t.recorded_at,
+            t.channel, s.state
        FROM ledger_transactions t
        JOIN transaction_states s ON s.transaction_id = t.transaction_id
       WHERE t.transaction_id = $1`,
@@ -63,7 +66,8 @@ export async function listByState(
   limit = 1000,
 ): Promise<LedgerTransaction[]> {
   const headers = await db.query<TransactionRow>(
-    `SELECT t.transaction_id, t.source, t.reference, t.occurred_at, t.recorded_at, s.state
+    `SELECT t.transaction_id, t.source, t.reference, t.occurred_at, t.recorded_at,
+            t.channel, s.state
        FROM ledger_transactions t
        JOIN transaction_states s ON s.transaction_id = t.transaction_id
       WHERE s.state = $1
@@ -105,7 +109,8 @@ export async function listByReference(
   reference: Reference,
 ): Promise<LedgerTransaction[]> {
   const headers = await db.query<TransactionRow>(
-    `SELECT t.transaction_id, t.source, t.reference, t.occurred_at, t.recorded_at, s.state
+    `SELECT t.transaction_id, t.source, t.reference, t.occurred_at, t.recorded_at,
+            t.channel, s.state
        FROM ledger_transactions t
        JOIN transaction_states s ON s.transaction_id = t.transaction_id
       WHERE t.source = $1 AND t.reference = $2
@@ -134,6 +139,7 @@ function toTransaction(row: TransactionRow, entries: readonly EntryRow[]): Ledge
     state: row.state,
     source: row.source,
     reference: row.reference,
+    channel: row.channel,
     occurredAt: row.occurred_at,
     recordedAt: row.recorded_at,
     entries: entries.map((entry) => ({

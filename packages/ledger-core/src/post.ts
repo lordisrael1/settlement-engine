@@ -1,6 +1,7 @@
 import type {
   AccountId,
   Money,
+  PaymentChannel,
   Reference,
   SourceId,
   TransactionId,
@@ -26,6 +27,14 @@ export interface PostTransactionInput {
   readonly recordedAt: Date;
   readonly initialState: TransactionState;
   readonly entries: readonly EntryInput[];
+  /**
+   * The rail the causing payment arrived on, where the transaction is about one payment.
+   *
+   * Optional because most transactions are not: a settlement booking covers a batch and an
+   * adjustment covers nothing. Recorded rather than derived, because the fee a promise is
+   * expected to attract is priced per channel.
+   */
+  readonly channel?: PaymentChannel | null;
 }
 
 export interface PostTransactionResult {
@@ -63,11 +72,19 @@ export async function postTransaction(
 
   return inTransaction(db, async (client) => {
     const inserted = await client.query<{ transaction_id: string }>(
-      `INSERT INTO ledger_transactions (transaction_id, source, reference, occurred_at, recorded_at)
-            VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO ledger_transactions
+              (transaction_id, source, reference, occurred_at, recorded_at, channel)
+            VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (transaction_id) DO NOTHING
          RETURNING transaction_id`,
-      [input.transactionId, input.source, input.reference, input.occurredAt, input.recordedAt],
+      [
+        input.transactionId,
+        input.source,
+        input.reference,
+        input.occurredAt,
+        input.recordedAt,
+        input.channel ?? null,
+      ],
     );
 
     if (inserted.rowCount === 0) {

@@ -1,15 +1,22 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { contractAt, feeFor, feeModel, money } from '@recon/canon';
+import { ANY_CHANNEL, contractAt, feeFor, feeModel, money } from '@recon/canon';
 
-import { PAYSTACK_PUBLISHED_NGN, publishedContract } from './fees.js';
+import { PAYSTACK_PUBLISHED_NGN, PAYSTACK_TRANSFER_NGN, publishedContract } from './fees.js';
 import { publishedContracts } from './sources.js';
 
 const MERCHANT = 'merchant-under-test';
 
+/** The scope a quote came from, for tests that are not about scoping. */
+const TEST_SCOPE = {
+  contractId: 'test',
+  channel: ANY_CHANNEL,
+  effectiveFrom: new Date(0),
+} as const;
+
 const paystackFee = (kobo: bigint) =>
-  feeFor(PAYSTACK_PUBLISHED_NGN, money(kobo), 'test');
+  feeFor(PAYSTACK_PUBLISHED_NGN, money(kobo), TEST_SCOPE);
 
 /**
  * The strongest available evidence that the rate card is right: Paystack states the fee
@@ -68,10 +75,10 @@ test('percentages round half-up at the kobo, in integer arithmetic', () => {
   };
 
   // 1.5% of 333 kobo is 4.995 kobo → 5. A float would make this 4.99499999...
-  assert.equal(feeFor(card, money(333n), 'test').fee.kobo, 5n);
+  assert.equal(feeFor(card, money(333n), TEST_SCOPE).fee.kobo, 5n);
   // 1.5% of 100 kobo is exactly 1.5 → half-up gives 2.
-  assert.equal(feeFor(card, money(100n), 'test').fee.kobo, 2n);
-  assert.equal(feeFor(card, money(0n), 'test').fee.kobo, 0n);
+  assert.equal(feeFor(card, money(100n), TEST_SCOPE).fee.kobo, 2n);
+  assert.equal(feeFor(card, money(0n), TEST_SCOPE).fee.kobo, 0n);
 });
 
 /**
@@ -80,7 +87,7 @@ test('percentages round half-up at the kobo, in integer arithmetic', () => {
  * contract did.
  */
 test('a payment is priced by the contract in force when it happened', () => {
-  const march = publishedContract('paystack', MERCHANT, PAYSTACK_PUBLISHED_NGN);
+  const march = publishedContract('paystack', MERCHANT, PAYSTACK_PUBLISHED_NGN, 'card');
   const negotiated = {
     ...march,
     contractId: 'negotiated-2026-04',
@@ -96,8 +103,8 @@ test('a payment is priced by the contract in force when it happened', () => {
 
   const model = feeModel(contracts);
 
-  const inMarch = model(money(1_000_000n), new Date('2026-03-15T10:00:00Z'));
-  const inApril = model(money(1_000_000n), new Date('2026-04-15T10:00:00Z'));
+  const inMarch = model(money(1_000_000n), new Date('2026-03-15T10:00:00Z'), 'card');
+  const inApril = model(money(1_000_000n), new Date('2026-04-15T10:00:00Z'), 'card');
 
   assert.equal(inMarch?.fee.kobo, 25_000n, 'March must still price at March rates');
   assert.equal(inApril?.fee.kobo, 10_000n);
@@ -113,20 +120,66 @@ test('contract windows meet exactly, with no gap and no overlap', () => {
   const boundary = new Date('2026-04-01T00:00:00Z');
   const contracts = [
     {
-      ...publishedContract('paystack', MERCHANT, PAYSTACK_PUBLISHED_NGN),
+      ...publishedContract('paystack', MERCHANT, PAYSTACK_PUBLISHED_NGN, 'card'),
       contractId: 'first',
       effectiveTo: boundary,
     },
     {
-      ...publishedContract('paystack', MERCHANT, PAYSTACK_PUBLISHED_NGN),
+      ...publishedContract('paystack', MERCHANT, PAYSTACK_PUBLISHED_NGN, 'card'),
       contractId: 'second',
       effectiveFrom: boundary,
       effectiveTo: null,
     },
   ];
 
-  assert.equal(contractAt(contracts, new Date(boundary.getTime() - 1))?.contractId, 'first');
-  assert.equal(contractAt(contracts, boundary)?.contractId, 'second');
+  const justBefore = new Date(boundary.getTime() - 1);
+  assert.equal(contractAt(contracts, justBefore, 'card', 'NGN')?.contractId, 'first');
+  assert.equal(contractAt(contracts, boundary, 'card', 'NGN')?.contractId, 'second');
+});
+
+/**
+ * The reason contracts carry a channel. Nigerian PSPs price a transfer at ten naira flat
+ * and a card at 1.5% — pricing a ₦500,000 transfer with the card contract predicts ₦7,500
+ * against an actual ₦10, and produces a `FEE_VARIANCE` on every transfer for ever. The
+ * balance would still be right; the exception queue would be useless, which is the same
+ * failure by a slower route.
+ */
+test('a transfer is priced by the transfer contract, not the card one', () => {
+  const model = feeModel(publishedContracts(MERCHANT).filter((c) => c.source === 'paystack'));
+  const at = new Date('2026-08-15T10:00:00Z');
+
+  assert.equal(model(money(50_000_000n), at, 'card')?.fee.kobo, 200_000n, 'capped at ₦2,000');
+  assert.equal(model(money(50_000_000n), at, 'bank_transfer')?.fee.kobo, 1_000n, '₦10 flat');
+});
+
+/**
+ * A blended contract covers every channel; a channel-specific one beats it. That is the
+ * single precedence rule in the pricing model, and it exists because "we negotiated one
+ * rate for everything, except cards" is how these agreements are actually written.
+ */
+test('a channel-specific contract wins over a blended one', () => {
+  const blended = publishedContract('acme', MERCHANT, PAYSTACK_TRANSFER_NGN, ANY_CHANNEL);
+  const cards = publishedContract('acme', MERCHANT, PAYSTACK_PUBLISHED_NGN, 'card');
+  const contracts = [blended, cards];
+  const at = new Date('2026-08-15T10:00:00Z');
+
+  assert.equal(contractAt(contracts, at, 'card', 'NGN')?.contractId, cards.contractId);
+  assert.equal(contractAt(contracts, at, 'ussd', 'NGN')?.contractId, blended.contractId);
+  // An undisclosed channel is not silently priced as a card. It finds the blended contract
+  // or nothing, which is the honest pair of outcomes.
+  assert.equal(contractAt(contracts, at, 'unknown', 'NGN')?.contractId, blended.contractId);
+});
+
+/**
+ * A rate quoted in naira says nothing about a payment in dollars. Applying it would invent
+ * a fee variance denominated in a currency the contract never mentioned.
+ */
+test('a contract does not price a currency it was not quoted in', () => {
+  const contracts = [publishedContract('acme', MERCHANT, PAYSTACK_PUBLISHED_NGN, 'card', 'NGN')];
+  const at = new Date('2026-08-15T10:00:00Z');
+
+  assert.ok(contractAt(contracts, at, 'card', 'NGN'));
+  assert.equal(contractAt(contracts, at, 'card', 'USD' as 'NGN'), null);
 });
 
 /**
@@ -140,5 +193,5 @@ test('a source with no published rate card gets no contract rather than a guess'
   assert.ok(!seeded.includes('nomba'));
 
   const model = feeModel(publishedContracts(MERCHANT).filter((c) => c.source === 'nomba'));
-  assert.equal(model(money(1_000_000n), new Date('2026-08-15T10:00:00Z')), null);
+  assert.equal(model(money(1_000_000n), new Date('2026-08-15T10:00:00Z'), 'card'), null);
 });

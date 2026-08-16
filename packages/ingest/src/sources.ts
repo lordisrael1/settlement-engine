@@ -14,8 +14,11 @@ import {
 } from './calendar.js';
 import {
   FLUTTERWAVE_PUBLISHED_NGN,
+  FLUTTERWAVE_TRANSFER_NGN,
   MONNIFY_PUBLISHED_NGN,
+  MONNIFY_TRANSFER_NGN,
   PAYSTACK_PUBLISHED_NGN,
+  PAYSTACK_TRANSFER_NGN,
   publishedContract,
 } from './fees.js';
 import {
@@ -62,14 +65,14 @@ export interface SourceProfile {
  * weekend into an incident.
  */
 const T_PLUS_1 = calendar({
-  cutOffMinutesUtc: CUT_OFF_5PM_WAT,
+  cutOffMinutes: CUT_OFF_5PM_WAT,
   settlementBusinessDays: 1,
   graceMinutes: ONE_DAY_GRACE,
 });
 
 /** Rails that quote T+2, with the same cut-off and the same tolerance. */
 const T_PLUS_2 = calendar({
-  cutOffMinutesUtc: CUT_OFF_5PM_WAT,
+  cutOffMinutes: CUT_OFF_5PM_WAT,
   settlementBusinessDays: 2,
   graceMinutes: ONE_DAY_GRACE,
 });
@@ -79,7 +82,7 @@ const T_PLUS_2 = calendar({
  * day, and unmatched money there is suspicious within hours rather than days.
  */
 const SAME_DAY = calendar({
-  cutOffMinutesUtc: CUT_OFF_5PM_WAT,
+  cutOffMinutes: CUT_OFF_5PM_WAT,
   settlementBusinessDays: 0,
   graceMinutes: FOUR_HOURS_GRACE,
 });
@@ -153,11 +156,23 @@ export function sourceProfile(source: SourceId): SourceProfile {
  * nothing honest to seed: the matcher will match its payments on amount and report the fee
  * it observed, rather than generating a permanent stream of variances against a rate
  * nobody ever quoted (D-026).
+ *
+ * Two contracts per source, not one: the card rate is a percentage and the transfer rate is
+ * ten naira flat, and a single blended contract would predict the card fee for every
+ * transfer. That is not a wrong balance — the fee charged always wins — but it is a
+ * permanent stream of variances against a price nobody quoted for that rail, which is the
+ * same thing as no fee model at all, only noisier.
+ *
+ * Nothing is seeded for `'*'`. A channel the rate cards do not cover — a USSD or POS
+ * collection — is left unpriced deliberately, and the matcher matches it on amounts alone.
  */
 export function publishedContracts(merchantId: MerchantId): FeeContract[] {
   return [
-    publishedContract(paystack.provider, merchantId, PAYSTACK_PUBLISHED_NGN),
-    publishedContract(flutterwave.provider, merchantId, FLUTTERWAVE_PUBLISHED_NGN),
-    publishedContract(monnify.provider, merchantId, MONNIFY_PUBLISHED_NGN),
+    publishedContract(paystack.provider, merchantId, PAYSTACK_PUBLISHED_NGN, 'card'),
+    publishedContract(paystack.provider, merchantId, PAYSTACK_TRANSFER_NGN, 'bank_transfer'),
+    publishedContract(flutterwave.provider, merchantId, FLUTTERWAVE_PUBLISHED_NGN, 'card'),
+    publishedContract(flutterwave.provider, merchantId, FLUTTERWAVE_TRANSFER_NGN, 'bank_transfer'),
+    publishedContract(monnify.provider, merchantId, MONNIFY_PUBLISHED_NGN, 'card'),
+    publishedContract(monnify.provider, merchantId, MONNIFY_TRANSFER_NGN, 'bank_transfer'),
   ];
 }

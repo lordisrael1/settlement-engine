@@ -10,6 +10,7 @@ import {
   ingestBankStatement,
   ingestSettlement,
   ingestWebhook,
+  publishedContracts,
   PAYSTACK_PUBLISHED_NGN,
 } from '@recon/ingest';
 import {
@@ -22,11 +23,15 @@ import {
   UnbalancedTransactionError,
 } from '@recon/ledger-core';
 import {
+  allocationsOf,
+  matchOf,
   reconcile,
   recordBankLines,
   recordEvidence,
   recordPayouts,
+  recordResolution,
   recordSettlementLines,
+  saveFeeContract,
 } from '@recon/reconciler';
 
 import { buildPolicy } from './policy.js';
@@ -158,7 +163,11 @@ export async function runDemo(pool: Pool): Promise<boolean> {
   for (const body of webhooks) {
     const data = (body as { data: { reference: string; amount: number; fees: number } }).data;
     const gross = money(BigInt(data.amount));
-    const predicted = feeFor(PAYSTACK_PUBLISHED_NGN, gross, 'published');
+    const predicted = feeFor(PAYSTACK_PUBLISHED_NGN, gross, {
+      contractId: 'published:paystack',
+      channel: 'card',
+      effectiveFrom: new Date(0),
+    });
     const actual = money(BigInt(data.fees));
     const agrees = predicted.fee.kobo === actual.kobo;
     feesAgree &&= agrees;
@@ -227,6 +236,13 @@ export async function runDemo(pool: Pool): Promise<boolean> {
 
   // ── Stage two ─────────────────────────────────────────────────────────────
   heading('9 · The report meets the ledger — and books nothing');
+
+  // The published rate cards, as dated contracts, scoped per channel. A deployment with
+  // signed agreements loads those instead; seeding list prices here means the demo is
+  // working from a price somebody can point at rather than from a constant in the matcher.
+  for (const contract of publishedContracts(MERCHANT)) {
+    await saveFeeContract(pool, contract);
+  }
 
   const policyFor = await buildPolicy(pool, MERCHANT);
   const beforeStageTwo = await balanceOf(pool, 'bank_account');
@@ -309,7 +325,124 @@ export async function runDemo(pool: Pool): Promise<boolean> {
   line('  The original entries are untouched. A mirror-image transaction cancels them,');
   line('  so an auditor sees both the payment and its undoing.');
 
-  heading('15 · The system checks itself');
+  // ── What each payment cost, and who said so ───────────────────────────────
+  heading('15 · What each payment in the batch actually cost');
+
+  const settled = stageThree.confirmation.confirmed[0];
+  if (settled) {
+    const allocations = await allocationsOf(pool, settled.inflow.key);
+    const explained = await matchOf(pool, `allocate:${settled.inflow.key}`);
+
+    line('  Flutterwave charged the payout, not the payments. Splitting the charge needs a');
+    line('  rule — pro rata by gross, largest remainder, ties broken by transaction id — and');
+    line('  the rule is exact-sum, so the shares add back to the deduction that was booked.');
+    line();
+    for (const allocation of allocations) {
+      const cost = allocation.deductions
+        .map((deduction) => `${deduction.accountId} ${format(deduction.amount)}`)
+        .join(', ');
+      line(
+        `  ${allocation.transactionId.slice(-14).padEnd(16)} gross ${format(allocation.amount).padStart(11)}` +
+          `   net ${format(allocation.net).padStart(11)}   ${cost || 'no share'}`,
+      );
+    }
+
+    line();
+    line('  And the contract that explained each one is stored beside the conclusion — not');
+    line('  recomputed later against a table that may since have been renegotiated:');
+    for (const explanation of explained?.explainedBy ?? []) {
+      line(
+        `  ${explanation.transactionId.slice(-14).padEnd(16)} ` +
+          `contract ${explanation.contractId ?? 'none — matched on amounts alone'}` +
+          (explanation.channel ? `  (${explanation.channel})` : ''),
+      );
+    }
+  }
+
+  // ── The human half ────────────────────────────────────────────────────────
+  heading('16 · A human decides — appended, approved, and compensated');
+
+  line('  An operator finds the PSP’s reserve notice: ₦40 of that "charge fee" was a');
+  line('  90-day rolling reserve. The original booking is not touched — it recorded what');
+  line('  we knew — and a second transaction moves the money to the account that');
+  line('  describes it. An auditor sees the mistake and the correction.');
+  line();
+
+  const reclassified = await recordResolution(
+    pool,
+    {
+      resolutionKey: 'demo:reclassify-reserve',
+      subject: 'payout',
+      subjectId: settled?.inflow.key ?? 'unknown',
+      action: 'reclassify',
+      reason: 'PSP reserve notice: ₦40 of the charge fee is a 90-day rolling reserve.',
+      amount: money(4_000n),
+      resolvedBy: 'ops.amaka@example.com',
+      resolvedAt: now,
+      evidenceId: null,
+      approvedBy: 'controller.tunde@example.com',
+      approvedAt: now,
+    },
+    {
+      entries: [
+        { accountId: 'psp_reserve', amount: money(4_000n) },
+        { accountId: 'fees_expense', amount: money(-4_000n) },
+      ],
+    },
+  );
+  line(`  ✓ booked ${reclassified.bookedTransactionId}`);
+  line('    psp_reserve  +₦40.00     fees_expense  −₦40.00');
+
+  line();
+  line('  Two things it may not do, and both refusals are the design:');
+
+  const selfApproved = await refusal(() =>
+    recordResolution(pool, {
+      resolutionKey: 'demo:self-approved',
+      subject: 'payout',
+      subjectId: 'demo',
+      action: 'write_off',
+      reason: 'Signed off by me, to me.',
+      amount: money(500_000n),
+      resolvedBy: 'ops.amaka@example.com',
+      resolvedAt: now,
+      evidenceId: null,
+      approvedBy: 'ops.amaka@example.com',
+      approvedAt: now,
+    }),
+  );
+  line(`  ✓ ${selfApproved}`);
+
+  const bankTouched = await refusal(() =>
+    recordResolution(
+      pool,
+      {
+        resolutionKey: 'demo:phantom-cash',
+        subject: 'bank_credit',
+        subjectId: 'demo',
+        action: 'clear_phantom',
+        reason: 'I am sure the money is there.',
+        amount: money(500_000n),
+        resolvedBy: 'ops.amaka@example.com',
+        resolvedAt: now,
+        evidenceId: null,
+        approvedBy: 'controller.tunde@example.com',
+        approvedAt: now,
+      },
+      {
+        entries: [
+          { accountId: 'bank_account', amount: money(500_000n) },
+          { accountId: 'suspense', amount: money(-500_000n) },
+        ],
+      },
+    ),
+  );
+  line(`  ✓ ${bankTouched}`);
+  line();
+  line('  Cash moves on bank evidence, and a human’s conclusion is not bank evidence.');
+  line('  The moment that is allowed "once, carefully", the three-way model is decoration.');
+
+  heading('17 · The system checks itself');
   const verified = await printVerification(pool);
 
   line();
@@ -318,9 +451,28 @@ export async function runDemo(pool: Pool): Promise<boolean> {
     feesAgree &&
     bankUnmoved &&
     idempotent &&
+    reclassified.bookedTransactionId !== null &&
+    selfApproved !== null &&
+    bankTouched !== null &&
     stageTwo.failures.length === 0 &&
     stageThree.failures.length === 0
   );
+}
+
+/**
+ * Run something that must fail, and report the refusal.
+ *
+ * A demo that only shows the happy path is a demo of a system nobody has tested. Returning
+ * `null` when the call *succeeds* makes an absent refusal fail the run rather than pass
+ * silently.
+ */
+async function refusal(attempt: () => Promise<unknown>): Promise<string | null> {
+  try {
+    await attempt();
+    return null;
+  } catch (error) {
+    return firstLine(error);
+  }
 }
 
 /** One account's balance, recomputed from entries. */

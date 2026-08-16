@@ -1,22 +1,26 @@
 import { fileURLToPath } from 'node:url';
 
 import type {
+  AccountId,
+  ApprovalPolicy,
   BankStatementLine,
   Evidence,
   FeeContract,
+  FeeExplanation,
   MatchResult,
   MerchantId,
   Money,
   Payout,
+  RecordedResolution,
   Resolution,
   SettlementAdjustment,
   SettlementLine,
   SourceId,
   TransactionId,
 } from '@recon/canon';
-import { money, ZERO } from '@recon/canon';
-import type { Executor } from '@recon/ledger-core';
-import { inTransaction } from '@recon/ledger-core';
+import { approvalFailure, DEFAULT_APPROVAL_POLICY, money, ZERO } from '@recon/canon';
+import type { EntryInput, Executor } from '@recon/ledger-core';
+import { bookResolutionAdjustment, inTransaction } from '@recon/ledger-core';
 
 import type { ExpectedInflow, InflowAllocation } from './inflow.js';
 
@@ -57,8 +61,8 @@ export async function recordEvidence(
   const result = await db.query(
     `INSERT INTO evidence
             (evidence_id, kind, source, filename, byte_length, received_from,
-             received_at, parser_version, raw)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             received_at, parser_version, storage_location, raw)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      ON CONFLICT (evidence_id) DO NOTHING`,
     [
       evidence.evidenceId,
@@ -69,6 +73,7 @@ export async function recordEvidence(
       evidence.receivedFrom,
       evidence.receivedAt,
       evidence.parserVersion,
+      evidence.storageLocation,
       raw,
     ],
   );
@@ -81,15 +86,18 @@ export async function recordEvidence(
 export async function saveFeeContract(db: Executor, contract: FeeContract): Promise<void> {
   await db.query(
     `INSERT INTO fee_contracts
-            (contract_id, source, merchant_id, effective_from, effective_to,
+            (contract_id, source, merchant_id, channel, currency,
+             effective_from, effective_to,
              percent_bp, flat_kobo, flat_waived_below_kobo, cap_kobo, vat_bp,
              approved_by, approved_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::bigint, $8::bigint, $9::bigint, $10, $11, $12)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::bigint, $10::bigint, $11::bigint, $12, $13, $14)
      ON CONFLICT (contract_id) DO NOTHING`,
     [
       contract.contractId,
       contract.source,
       contract.merchantId,
+      contract.channel,
+      contract.currency,
       contract.effectiveFrom,
       contract.effectiveTo,
       contract.rateCard.percentBasisPoints,
@@ -118,6 +126,8 @@ export async function loadFeeContracts(
     contract_id: string;
     source: string;
     merchant_id: string;
+    channel: FeeContract['channel'];
+    currency: FeeContract['currency'];
     effective_from: Date;
     effective_to: Date | null;
     percent_bp: number;
@@ -128,12 +138,13 @@ export async function loadFeeContracts(
     approved_by: string;
     approved_at: Date;
   }>(
-    `SELECT contract_id, source, merchant_id, effective_from, effective_to,
+    `SELECT contract_id, source, merchant_id, channel, currency,
+            effective_from, effective_to,
             percent_bp, flat_kobo::text, flat_waived_below_kobo::text, cap_kobo::text,
             vat_bp, approved_by, approved_at
        FROM fee_contracts
       WHERE source = $1 AND merchant_id = $2
-      ORDER BY effective_from DESC`,
+      ORDER BY effective_from DESC, channel`,
     [source, merchantId],
   );
 
@@ -141,6 +152,8 @@ export async function loadFeeContracts(
     contractId: row.contract_id,
     source: row.source,
     merchantId: row.merchant_id,
+    channel: row.channel,
+    currency: row.currency,
     effectiveFrom: row.effective_from,
     effectiveTo: row.effective_to,
     rateCard: {
@@ -168,8 +181,9 @@ export async function recordPayouts(
       const result = await client.query(
         `INSERT INTO payouts
                 (idempotency_key, payout_reference, source, status, gross_kobo,
-                 expected_net_kobo, currency, adjustments, reported_at, value_date, evidence_id)
-         VALUES ($1, $2, $3, $4, $5::bigint, $6::bigint, $7, $8::jsonb, $9, $10, $11)
+                 expected_net_kobo, currency, adjustments, reported_at, value_date,
+                 evidence_id, source_row_number, source_path)
+         VALUES ($1, $2, $3, $4, $5::bigint, $6::bigint, $7, $8::jsonb, $9, $10, $11, $12, $13)
          ON CONFLICT (idempotency_key) DO NOTHING`,
         [
           payout.idempotencyKey,
@@ -189,6 +203,8 @@ export async function recordPayouts(
           payout.reportedAt,
           payout.valueDate,
           payout.evidenceId,
+          payout.lineage.rowNumber,
+          payout.lineage.path,
         ],
       );
       stored += result.rowCount ?? 0;
@@ -206,10 +222,11 @@ export async function recordSettlementLines(
     for (const line of lines) {
       const result = await client.query(
         `INSERT INTO settlement_lines
-                (idempotency_key, source, reference, payout_reference, merchant_id,
+                (idempotency_key, source, reference, payout_reference, merchant_id, channel,
                  gross_kobo, fee_kobo, net_kobo, currency, status, settled_at,
-                 reason_hints, evidence_id)
-         VALUES ($1, $2, $3, $4, $5, $6::bigint, $7::bigint, $8::bigint, $9, $10, $11, $12, $13)
+                 reason_hints, evidence_id, source_row_number, source_path)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::bigint, $8::bigint, $9::bigint, $10, $11, $12,
+                 $13, $14, $15, $16)
          ON CONFLICT (idempotency_key) DO NOTHING`,
         [
           line.idempotencyKey,
@@ -217,6 +234,7 @@ export async function recordSettlementLines(
           line.reference,
           line.payoutReference,
           line.merchantId,
+          line.channel,
           kobo(line.gross),
           kobo(line.fee),
           kobo(line.net),
@@ -225,6 +243,8 @@ export async function recordSettlementLines(
           line.settledAt,
           [...line.reasonHints],
           line.evidenceId,
+          line.lineage.rowNumber,
+          line.lineage.path,
         ],
       );
       stored += result.rowCount ?? 0;
@@ -244,8 +264,8 @@ export async function recordBankLines(
         `INSERT INTO bank_statement_lines
                 (idempotency_key, bank_account_id, reference, direction, amount_kobo,
                  balance_after_kobo, currency, value_date, narration, narration_tokens,
-                 stated_reference, evidence_id)
-         VALUES ($1, $2, $3, $4, $5::bigint, $6::bigint, $7, $8, $9, $10, $11, $12)
+                 stated_reference, evidence_id, source_row_number, source_path)
+         VALUES ($1, $2, $3, $4, $5::bigint, $6::bigint, $7, $8, $9, $10, $11, $12, $13, $14)
          ON CONFLICT (idempotency_key) DO NOTHING`,
         [
           line.idempotencyKey,
@@ -260,6 +280,8 @@ export async function recordBankLines(
           [...line.narrationTokens],
           line.statedReference,
           line.evidenceId,
+          line.lineage.rowNumber,
+          line.lineage.path,
         ],
       );
       stored += result.rowCount ?? 0;
@@ -281,10 +303,13 @@ export async function unallocatedPayouts(db: Executor, limit = 1000): Promise<Pa
     reported_at: Date;
     value_date: Date | null;
     evidence_id: string;
+    source_row_number: number | null;
+    source_path: string | null;
   }>(
     `SELECT p.idempotency_key, p.payout_reference, p.source, p.status,
             p.gross_kobo::text, p.expected_net_kobo::text, p.adjustments,
-            p.reported_at, p.value_date, p.evidence_id
+            p.reported_at, p.value_date, p.evidence_id,
+            p.source_row_number, p.source_path
        FROM payouts p
       WHERE NOT EXISTS (SELECT 1 FROM expected_inflows i WHERE i.inflow_key = p.payout_reference)
       ORDER BY p.payout_reference
@@ -308,6 +333,7 @@ export async function unallocatedPayouts(db: Executor, limit = 1000): Promise<Pa
     reportedAt: row.reported_at,
     valueDate: row.value_date,
     evidenceId: row.evidence_id,
+    lineage: { rowNumber: row.source_row_number, path: row.source_path },
     idempotencyKey: row.idempotency_key,
   }));
 }
@@ -328,6 +354,7 @@ export async function unallocatedSettlementLines(
     reference: string;
     payout_reference: string | null;
     merchant_id: string;
+    channel: SettlementLine['channel'] | null;
     gross_kobo: string;
     fee_kobo: string;
     net_kobo: string;
@@ -335,10 +362,13 @@ export async function unallocatedSettlementLines(
     settled_at: Date | null;
     reason_hints: string[];
     evidence_id: string;
+    source_row_number: number | null;
+    source_path: string | null;
   }>(
     `SELECT l.idempotency_key, l.source, l.reference, l.payout_reference, l.merchant_id,
-            l.gross_kobo::text, l.fee_kobo::text, l.net_kobo::text,
-            l.status, l.settled_at, l.reason_hints, l.evidence_id
+            l.channel, l.gross_kobo::text, l.fee_kobo::text, l.net_kobo::text,
+            l.status, l.settled_at, l.reason_hints, l.evidence_id,
+            l.source_row_number, l.source_path
        FROM settlement_lines l
       WHERE NOT EXISTS (
               SELECT 1 FROM expected_inflows i
@@ -358,6 +388,8 @@ export async function unallocatedSettlementLines(
     source: row.source,
     payoutReference: row.payout_reference,
     merchantId: row.merchant_id,
+    // A line stored before the column existed knows only that it does not know.
+    channel: row.channel ?? 'unknown',
     gross: fromKobo(row.gross_kobo),
     fee: fromKobo(row.fee_kobo),
     net: fromKobo(row.net_kobo),
@@ -365,6 +397,7 @@ export async function unallocatedSettlementLines(
     settledAt: row.settled_at,
     reasonHints: row.reason_hints,
     evidenceId: row.evidence_id,
+    lineage: { rowNumber: row.source_row_number, path: row.source_path },
     idempotencyKey: row.idempotency_key,
   }));
 }
@@ -386,10 +419,13 @@ export async function unmatchedBankLines(
     narration_tokens: string[];
     stated_reference: string | null;
     evidence_id: string;
+    source_row_number: number | null;
+    source_path: string | null;
   }>(
     `SELECT b.idempotency_key, b.bank_account_id, b.reference, b.direction,
             b.amount_kobo::text, b.balance_after_kobo::text, b.value_date,
-            b.narration, b.narration_tokens, b.stated_reference, b.evidence_id
+            b.narration, b.narration_tokens, b.stated_reference, b.evidence_id,
+            b.source_row_number, b.source_path
        FROM bank_statement_lines b
       WHERE NOT EXISTS (
               SELECT 1 FROM expected_inflows i WHERE i.confirmed_by = b.idempotency_key
@@ -410,6 +446,7 @@ export async function unmatchedBankLines(
     narrationTokens: row.narration_tokens,
     statedReference: row.stated_reference,
     evidenceId: row.evidence_id,
+    lineage: { rowNumber: row.source_row_number, path: row.source_path },
     idempotencyKey: row.idempotency_key,
   }));
 }
@@ -451,9 +488,21 @@ export async function saveInflow(
 
     for (const allocation of allocations) {
       await client.query(
-        `INSERT INTO inflow_allocations (inflow_key, transaction_id, amount_kobo)
-              VALUES ($1, $2, $3::bigint)`,
-        [inflow.key, allocation.transactionId, kobo(allocation.amount)],
+        `INSERT INTO inflow_allocations
+                (inflow_key, transaction_id, amount_kobo, net_kobo, deductions)
+              VALUES ($1, $2, $3::bigint, $4::bigint, $5::jsonb)`,
+        [
+          inflow.key,
+          allocation.transactionId,
+          kobo(allocation.amount),
+          kobo(allocation.net),
+          JSON.stringify(
+            allocation.deductions.map((deduction) => ({
+              account_id: deduction.accountId,
+              kobo: kobo(deduction.amount),
+            })),
+          ),
+        ],
       );
     }
   });
@@ -580,18 +629,44 @@ export async function allocatedByTransaction(
   return allocated;
 }
 
+/**
+ * What one inflow closed, per promise: the gross, its apportioned share of each deduction,
+ * and what it therefore contributed to the credit.
+ *
+ * The net and the shares are read back rather than recomputed, because the apportionment
+ * rule is a choice and a stored answer stays reproducible after the choice changes.
+ */
 export async function allocationsOf(
   db: Executor,
   inflowKey: string,
-): Promise<{ transactionId: string; amount: Money }[]> {
-  const result = await db.query<{ transaction_id: string; amount_kobo: string }>(
-    `SELECT transaction_id, amount_kobo::text
+): Promise<
+  {
+    transactionId: string;
+    amount: Money;
+    net: Money;
+    deductions: { accountId: AccountId; amount: Money }[];
+  }[]
+> {
+  const result = await db.query<{
+    transaction_id: string;
+    amount_kobo: string;
+    net_kobo: string | null;
+    deductions: { account_id: string; kobo: string }[];
+  }>(
+    `SELECT transaction_id, amount_kobo::text, net_kobo::text, deductions
        FROM inflow_allocations WHERE inflow_key = $1 ORDER BY transaction_id`,
     [inflowKey],
   );
   return result.rows.map((row) => ({
     transactionId: row.transaction_id,
     amount: fromKobo(row.amount_kobo),
+    // An allocation written before apportionment existed carried gross only. Its net is
+    // its gross as far as anybody recorded, and saying so beats inventing a split now.
+    net: fromKobo(row.net_kobo ?? row.amount_kobo),
+    deductions: row.deductions.map((deduction) => ({
+      accountId: deduction.account_id as AccountId,
+      amount: fromKobo(deduction.kobo),
+    })),
   }));
 }
 
@@ -612,8 +687,9 @@ export async function recordMatch(
   at: Date,
 ): Promise<void> {
   await db.query(
-    `INSERT INTO matches (match_id, reason, confidence, links, booked_transaction_id, at)
-          VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+    `INSERT INTO matches
+            (match_id, reason, confidence, links, fee_explanations, booked_transaction_id, at)
+          VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)
      ON CONFLICT (match_id) DO NOTHING`,
     [
       matchId,
@@ -625,56 +701,149 @@ export async function recordMatch(
         payoutReferences: result.payoutReferences,
         bankCreditKeys: result.bankCreditKeys,
       }),
+      // The contract that priced each promise, frozen at the moment it priced it. Rates are
+      // renegotiated and rate cards are corrected; a decision recomputed against a later
+      // table can reach a different answer than the one we acted on, which is exactly what
+      // effective-dated contracts exist to prevent — so the answer is stored, not derived.
+      JSON.stringify(
+        result.explainedBy.map((explanation) => ({
+          transaction_id: explanation.transactionId,
+          contract_id: explanation.contractId,
+          channel: explanation.channel,
+          expected_fee_kobo: explanation.expectedFee ? kobo(explanation.expectedFee) : null,
+          expected_vat_kobo: explanation.expectedVat ? kobo(explanation.expectedVat) : null,
+          observed_fee_kobo: explanation.observedFee ? kobo(explanation.observedFee) : null,
+        })),
+      ),
       bookedTransactionId,
       at,
     ],
   );
 }
 
+export class UnapprovedResolutionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnapprovedResolutionError';
+  }
+}
+
+export interface ResolutionOptions {
+  /**
+   * The compensating journal this decision posts, if it posts one.
+   *
+   * Reclassifying a ₦1,000 "unexplained deduction" as a rolling reserve is two entries:
+   * `psp_reserve +1,000`, `fees_expense −1,000`. The original booking is not touched — it
+   * recorded what we knew, and that we were wrong about it is a second fact, not a reason to
+   * erase the first.
+   */
+  readonly entries?: readonly EntryInput[];
+  /** Which decisions need a second pair of eyes. Defaults to `DEFAULT_APPROVAL_POLICY`. */
+  readonly policy?: ApprovalPolicy;
+}
+
 /**
- * A human's decision, appended.
+ * A human's decision, appended — and the ledger entry it causes, posted with it.
  *
  * There is deliberately no `updateResolution`. A reviewer who changes their mind appends a
  * second one; both stay visible, and so does the fact that somebody changed their mind.
+ *
+ * Three rules are enforced before anything is written, and each of them exists because the
+ * alternative is a control that looks like a control:
+ *
+ *   **Maker-checker.** Decisions above a threshold, decisions on the policy's list, and
+ *   every decision that moves value need an approver who is not the person deciding. The
+ *   person who noticed a discrepancy is the person best placed to make it disappear; they
+ *   are usually acting in good faith and occasionally they are not, and a second named
+ *   human is the cheapest control that tells the two apart. A database constraint refuses
+ *   self-approval independently, because a rule enforced in one layer is one refactor from
+ *   not existing.
+ *
+ *   **The booking and the decision are one write.** Both land or neither does. A
+ *   compensating entry whose justification failed to save is money moved for no recorded
+ *   reason, which is indistinguishable from money moved for no reason.
+ *
+ *   **No resolution touches `bank_account`.** Enforced in the ledger, where the entries
+ *   actually get written — see `bookResolutionAdjustment`.
  */
-export async function recordResolution(db: Executor, resolution: Resolution): Promise<void> {
-  await db.query(
-    `INSERT INTO resolutions
-            (subject, subject_id, action, reason, resolved_by, resolved_at,
-             evidence_id, approved_by, approved_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [
-      resolution.subject,
-      resolution.subjectId,
-      resolution.action,
-      resolution.reason,
-      resolution.resolvedBy,
-      resolution.resolvedAt,
-      resolution.evidenceId,
-      resolution.approvedBy,
-      resolution.approvedAt,
-    ],
-  );
+export async function recordResolution(
+  db: Executor,
+  resolution: Resolution,
+  options: ResolutionOptions = {},
+): Promise<RecordedResolution> {
+  const entries = options.entries ?? [];
+  const policy = options.policy ?? DEFAULT_APPROVAL_POLICY;
+
+  const failure = approvalFailure(policy, resolution, entries.length > 0);
+  if (failure) throw new UnapprovedResolutionError(failure);
+
+  return inTransaction(db, async (client) => {
+    const booked =
+      entries.length > 0
+        ? await bookResolutionAdjustment(client, resolution, entries, policy)
+        : null;
+
+    const inserted = await client.query<{ booked_transaction_id: string | null }>(
+      `INSERT INTO resolutions
+              (resolution_key, subject, subject_id, action, reason, amount_kobo, currency,
+               resolved_by, resolved_at, evidence_id, approved_by, approved_at,
+               booked_transaction_id)
+       VALUES ($1, $2, $3, $4, $5, $6::bigint, $7, $8, $9, $10, $11, $12, $13)
+       ON CONFLICT (resolution_key) DO NOTHING
+         RETURNING booked_transaction_id`,
+      [
+        resolution.resolutionKey,
+        resolution.subject,
+        resolution.subjectId,
+        resolution.action,
+        resolution.reason,
+        resolution.amount ? kobo(resolution.amount) : null,
+        resolution.amount ? resolution.amount.currency : null,
+        resolution.resolvedBy,
+        resolution.resolvedAt,
+        resolution.evidenceId,
+        resolution.approvedBy,
+        resolution.approvedAt,
+        booked?.transactionId ?? null,
+      ],
+    );
+
+    // No row back means the key was already there: a retried request, whose booking also
+    // collided on its own primary key and posted nothing a second time. Nothing to do, and
+    // nothing to undo — so report the transaction the first attempt created.
+    const written = inserted.rows[0];
+    return {
+      resolution,
+      bookedTransactionId: written
+        ? written.booked_transaction_id
+        : (booked?.transactionId ?? null),
+    };
+  });
 }
 
+/** Every decision ever recorded about one thing, oldest first, with what each of them booked. */
 export async function resolutionsFor(
   db: Executor,
   subject: Resolution['subject'],
   subjectId: string,
-): Promise<Resolution[]> {
+): Promise<RecordedResolution[]> {
   const result = await db.query<{
+    resolution_key: string;
     subject: Resolution['subject'];
     subject_id: string;
     action: string;
     reason: string;
+    amount_kobo: string | null;
     resolved_by: string;
     resolved_at: Date;
     evidence_id: string | null;
     approved_by: string | null;
     approved_at: Date | null;
+    booked_transaction_id: string | null;
   }>(
-    `SELECT subject, subject_id, action, reason, resolved_by, resolved_at,
-            evidence_id, approved_by, approved_at
+    `SELECT resolution_key, subject, subject_id, action, reason, amount_kobo::text,
+            resolved_by, resolved_at, evidence_id, approved_by, approved_at,
+            booked_transaction_id
        FROM resolutions
       WHERE subject = $1 AND subject_id = $2
       ORDER BY resolution_id`,
@@ -682,28 +851,40 @@ export async function resolutionsFor(
   );
 
   return result.rows.map((row) => ({
-    subject: row.subject,
-    subjectId: row.subject_id,
-    action: row.action,
-    reason: row.reason,
-    resolvedBy: row.resolved_by,
-    resolvedAt: row.resolved_at,
-    evidenceId: row.evidence_id,
-    approvedBy: row.approved_by,
-    approvedAt: row.approved_at,
+    resolution: {
+      resolutionKey: row.resolution_key,
+      subject: row.subject,
+      subjectId: row.subject_id,
+      action: row.action,
+      reason: row.reason,
+      amount: row.amount_kobo === null ? null : fromKobo(row.amount_kobo),
+      resolvedBy: row.resolved_by,
+      resolvedAt: row.resolved_at,
+      evidenceId: row.evidence_id,
+      approvedBy: row.approved_by,
+      approvedAt: row.approved_at,
+    },
+    bookedTransactionId: row.booked_transaction_id,
   }));
 }
 
 export async function matchOf(
   db: Executor,
   matchId: string,
-): Promise<{ reason: string; confidence: number; bookedTransactionId: string | null } | null> {
+): Promise<{
+  reason: string;
+  confidence: number;
+  bookedTransactionId: string | null;
+  /** Which fee contract explained each promise, as it stood when the decision was made. */
+  explainedBy: FeeExplanation[];
+} | null> {
   const result = await db.query<{
     reason: string;
     confidence: string;
     booked_transaction_id: string | null;
+    fee_explanations: StoredExplanation[];
   }>(
-    `SELECT reason, confidence::text, booked_transaction_id
+    `SELECT reason, confidence::text, booked_transaction_id, fee_explanations
        FROM matches WHERE match_id = $1`,
     [matchId],
   );
@@ -713,7 +894,24 @@ export async function matchOf(
         reason: row.reason,
         confidence: Number(row.confidence),
         bookedTransactionId: row.booked_transaction_id,
+        explainedBy: row.fee_explanations.map((explanation) => ({
+          transactionId: explanation.transaction_id,
+          contractId: explanation.contract_id,
+          channel: explanation.channel,
+          expectedFee: explanation.expected_fee_kobo === null ? null : fromKobo(explanation.expected_fee_kobo),
+          expectedVat: explanation.expected_vat_kobo === null ? null : fromKobo(explanation.expected_vat_kobo),
+          observedFee: explanation.observed_fee_kobo === null ? null : fromKobo(explanation.observed_fee_kobo),
+        })),
       }
     : null;
+}
+
+interface StoredExplanation {
+  transaction_id: string;
+  contract_id: string | null;
+  channel: FeeExplanation['channel'];
+  expected_fee_kobo: string | null;
+  expected_vat_kobo: string | null;
+  observed_fee_kobo: string | null;
 }
 

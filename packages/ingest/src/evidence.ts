@@ -20,6 +20,14 @@ export interface EvidenceContext {
   /** An operator's id, a cron job's name, an API client — who put this in front of us. */
   readonly receivedFrom: string;
   readonly receivedAt: Date;
+  /**
+   * Where the bytes were also put — an object-store URI, a vault path.
+   *
+   * Optional because a small deployment keeps them in the database and needs no second
+   * copy. Supplied by whoever did the storing, because only they know where it went; this
+   * layer records the locator and never resolves it, which keeps ingest free of a network.
+   */
+  readonly storageLocation?: string | null;
 }
 
 export function sha256(bytes: Buffer): string {
@@ -37,6 +45,7 @@ export function evidenceOf(
     source: context.source,
     filename: context.filename,
     byteLength: bytes.byteLength,
+    storageLocation: context.storageLocation ?? null,
     receivedFrom: context.receivedFrom,
     receivedAt: context.receivedAt,
     parserVersion,

@@ -1,9 +1,11 @@
 import type {
   AccountId,
   BankStatementLine,
+  FeeExplanation,
   LedgerTransaction,
   MatchResult,
   Money,
+  PaymentChannel,
   Payout,
   Reference,
   SettlementLine,
@@ -26,6 +28,8 @@ import {
   derivedKey,
   inflowFromLines,
   inflowFromPayout,
+  withApportionment,
+  type AllocationDraft,
   type ExpectedInflow,
   type InflowAllocation,
 } from './inflow.js';
@@ -97,6 +101,11 @@ export interface OpenPromise {
   readonly reference: Reference;
   readonly occurredAt: Date;
   readonly state: TransactionState;
+  /**
+   * The rail it arrived on, where the promise knows. Drives which fee contract prices it,
+   * since card and transfer are rarely the same rate.
+   */
+  readonly channel: PaymentChannel | null;
   /** What the receivable was opened at. */
   readonly gross: Money;
   /** How much of it earlier runs already allocated. */
@@ -125,6 +134,7 @@ export function promisesIn(
       reference: transaction.reference,
       occurredAt: transaction.occurredAt,
       state: transaction.state,
+      channel: transaction.channel,
       gross,
       allocated: allocatedByTransaction.get(transaction.transactionId) ?? ZERO,
     }));
@@ -225,27 +235,36 @@ export function allocate(input: AllocateInput): AllocateResult {
       continue;
     }
 
-    const allocations = partial
+    const covered = partial ? [partial] : subset!;
+    const drafts: AllocationDraft[] = partial
       ? [{ transactionId: partial.transactionId, receivable: partial.gross, amount: payout.gross }]
       : subset!.map((promise) => ({
           transactionId: promise.transactionId,
           receivable: promise.gross,
           amount: stillOwed(promise),
         }));
-    for (const allocation of allocations) {
+    for (const draft of drafts) {
       claimed.set(
-        allocation.transactionId,
-        sum([claimed.get(allocation.transactionId) ?? ZERO, allocation.amount]),
+        draft.transactionId,
+        sum([claimed.get(draft.transactionId) ?? ZERO, draft.amount]),
       );
     }
 
+    // The deductions belong to the movement; the promises inside it each carry a share.
+    // Which share is a rule we chose — see `apportion.ts` — and it is applied here so that
+    // the answer is recorded with the decision rather than recomputed later against a rule
+    // that may since have changed.
+    const inflow = inflowFromPayout(payout, drafts);
+    const allocations = withApportionment(inflow.deductions, drafts);
+
     prepared.push({
-      inflow: inflowFromPayout(payout, allocations),
+      inflow,
       allocations,
       result: {
         ...NO_LINKS,
         transactionIds: allocations.map((a) => a.transactionId),
         payoutReferences: [payout.payoutReference],
+        explainedBy: explainAllocations(covered, allocations, policy(payout.source)),
         reason: 'PAYOUT_MATCH',
         confidence: partial ? CONFIDENCE.batch : CONFIDENCE.payout,
       },
@@ -261,7 +280,10 @@ export function allocate(input: AllocateInput): AllocateResult {
     else byReference.set(key, [promise]);
   }
 
-  const grouped = new Map<string, { lines: SettlementLine[]; allocations: InflowAllocation[] }>();
+  const grouped = new Map<
+    string,
+    { lines: SettlementLine[]; drafts: AllocationDraft[]; explanations: FeeExplanation[] }
+  >();
 
   for (const line of lines) {
     if (line.payoutReference !== null) continue; // already carried by a payout above
@@ -309,7 +331,13 @@ export function allocate(input: AllocateInput): AllocateResult {
           evidenceId: line.evidenceId,
         },
         allocations: [
-          { transactionId: promise.transactionId, receivable: promise.gross, amount: promise.gross },
+          {
+            transactionId: promise.transactionId,
+            receivable: promise.gross,
+            amount: promise.gross,
+            deductions: [],
+            net: promise.gross,
+          },
         ],
         result: {
           ...NO_LINKS,
@@ -326,25 +354,32 @@ export function allocate(input: AllocateInput): AllocateResult {
     claimed.set(promise.transactionId, sum([claimed.get(promise.transactionId) ?? ZERO, amount]));
 
     const key = derivedKey(line.source, line.settledAt);
-    const group = grouped.get(key) ?? { lines: [], allocations: [] };
+    const group = grouped.get(key) ?? { lines: [], drafts: [], explanations: [] };
     group.lines.push(line);
-    group.allocations.push({
+    group.drafts.push({
       transactionId: promise.transactionId,
       receivable: promise.gross,
       amount,
     });
+    // The contract that priced this line, kept with the conclusion it justified. A later
+    // renegotiation must not be able to change the answer to "why did we accept this fee?"
+    if (conclusion.explanation) group.explanations.push(conclusion.explanation);
     grouped.set(key, group);
   }
 
   for (const [, group] of [...grouped].sort(([a], [b]) => (a < b ? -1 : 1))) {
     const first = group.lines[0]!;
+    const inflow = inflowFromLines(first.source, first.settledAt, group.lines, group.drafts);
+    const allocations = withApportionment(inflow.deductions, group.drafts);
+
     prepared.push({
-      inflow: inflowFromLines(first.source, first.settledAt, group.lines, group.allocations),
-      allocations: group.allocations,
+      inflow,
+      allocations,
       result: {
         ...NO_LINKS,
-        transactionIds: group.allocations.map((a) => a.transactionId),
+        transactionIds: allocations.map((a) => a.transactionId),
         settlementKeys: group.lines.map((line) => line.idempotencyKey),
+        explainedBy: group.explanations,
         reason: 'BATCH_MATCH',
         confidence: CONFIDENCE.batch,
       },
@@ -548,6 +583,53 @@ function notBefore(credit: BankStatementLine, inflow: ExpectedInflow): boolean {
 interface Conclusion {
   readonly reason: MatchResult['reason'];
   readonly confidence: number;
+  /** The contract that priced it, where pricing was involved at all. */
+  readonly explanation?: FeeExplanation;
+}
+
+/**
+ * What each promise in a movement was expected to cost, and what it appears to have cost.
+ *
+ * The expectation comes from the contract in force *at the payment's own moment*, for the
+ * payment's own channel — the whole point of dated, scoped contracts. The observation comes
+ * from apportionment: the payout charged the batch, and this promise's share of that charge
+ * is what it cost by the rule we chose.
+ *
+ * Recorded whether or not the two agree, and recorded with `contractId: null` when no
+ * contract covered the payment at all. "We matched this on amounts alone" is a conclusion,
+ * and a conclusion left unwritten is indistinguishable later from one nobody reached.
+ */
+function explainAllocations(
+  promises: readonly OpenPromise[],
+  allocations: readonly InflowAllocation[],
+  policy: SourcePolicy,
+): FeeExplanation[] {
+  const byTransaction = new Map(allocations.map((a) => [a.transactionId, a]));
+
+  return promises.map((promise) => {
+    const allocation = byTransaction.get(promise.transactionId);
+    const predicted = policy.expectedFee
+      ? policy.expectedFee(
+          allocation?.amount ?? promise.gross,
+          promise.occurredAt,
+          promise.channel ?? 'unknown',
+        )
+      : null;
+
+    const share = (accountId: AccountId): Money | null => {
+      const entries = allocation?.deductions.filter((d) => d.accountId === accountId) ?? [];
+      return entries.length === 0 ? null : sum(entries.map((entry) => entry.amount));
+    };
+
+    return {
+      transactionId: promise.transactionId,
+      contractId: predicted?.contractId ?? null,
+      channel: predicted?.channel ?? null,
+      expectedFee: predicted?.fee ?? null,
+      expectedVat: predicted?.vat ?? null,
+      observedFee: share('fees_expense'),
+    };
+  });
 }
 
 /**
@@ -595,21 +677,34 @@ function concludeAmounts(
   line: SettlementLine,
   policy: SourcePolicy,
 ): Conclusion {
+  // The line states its own channel, which is better information than the promise's: the
+  // settlement report is the source describing what it actually processed. Fall back to the
+  // promise's, then to `unknown`, which finds a blended contract or nothing.
+  const channel = line.channel ?? promise.channel ?? 'unknown';
   const predicted = policy.expectedFee
-    ? policy.expectedFee(promise.gross, promise.occurredAt)
+    ? policy.expectedFee(promise.gross, promise.occurredAt, channel)
     : null;
+
+  const explanation: FeeExplanation = {
+    transactionId: promise.transactionId,
+    contractId: predicted?.contractId ?? null,
+    channel: predicted?.channel ?? null,
+    expectedFee: predicted?.fee ?? null,
+    expectedVat: predicted?.vat ?? null,
+    observedFee: line.fee,
+  };
 
   if (equals(line.gross, promise.gross)) {
     return predicted === null || equals(predicted.total, line.fee)
-      ? { reason: 'EXACT_MATCH', confidence: CONFIDENCE.exact }
-      : { reason: 'FEE_VARIANCE', confidence: CONFIDENCE.feeVariance };
+      ? { reason: 'EXACT_MATCH', confidence: CONFIDENCE.exact, explanation }
+      : { reason: 'FEE_VARIANCE', confidence: CONFIDENCE.feeVariance, explanation };
   }
 
   if (predicted !== null && equals(subtract(promise.gross, predicted.total), line.net)) {
-    return { reason: 'FEE_ADJUSTED_MATCH', confidence: CONFIDENCE.feeAdjusted };
+    return { reason: 'FEE_ADJUSTED_MATCH', confidence: CONFIDENCE.feeAdjusted, explanation };
   }
 
-  return { reason: 'AMOUNT_MISMATCH', confidence: CONFIDENCE.none };
+  return { reason: 'AMOUNT_MISMATCH', confidence: CONFIDENCE.none, explanation };
 }
 
 /**
@@ -643,7 +738,7 @@ function solveAgainst(
   const byNet = uniqueSubsetSummingTo(
     reachable,
     (promise) => {
-      const predicted = model(owed(promise), promise.occurredAt);
+      const predicted = model(owed(promise), promise.occurredAt, promise.channel ?? 'unknown');
       return predicted ? subtract(owed(promise), predicted.total).kobo : owed(promise).kobo;
     },
     expectedNet.kobo,

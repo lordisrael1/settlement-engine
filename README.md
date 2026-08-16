@@ -102,10 +102,12 @@ and posted as a balanced `authorized` transaction that cannot be duplicated, unb
 edited. A settlement report becomes a `Payout` with named deductions — fee, tax, reserve,
 penalty, chargeback — each bound for its own account. A bank statement becomes canonical
 credit and debit lines. The matcher allocates payments to payouts without booking anything,
-and books cash only when an independent bank credit confirms the payout. Fee expectations
-come from dated per-merchant contracts; deadlines come from a business calendar with
-cut-offs, weekends and Nigerian public holidays. Every record traces to the SHA-256 of the
-file it came from.
+and books cash only when an independent bank credit confirms the payout, splitting each
+batch deduction across the payments it was charged on. Fee expectations come from dated
+contracts scoped per merchant, source, channel and currency; deadlines come from a business
+calendar with a named time zone, cut-offs, weekends and versioned Nigerian holiday tables.
+Every record traces to the SHA-256 of the file it came from and to the row inside it, and a
+human correction is an approved, appended decision that posts its own compensating entry.
 
 **What does not exist yet** is the exception *state machine* and the queue a human works
 from — the findings are produced and recorded, but nothing yet moves them through
@@ -131,7 +133,7 @@ Dependencies point one way only, downward toward `canon`. No cycles.
 | [docs/RECONCILIATION-BIBLE.md](docs/RECONCILIATION-BIBLE.md) | The doctrine: core beliefs, the seven Laws, target attributes, and the ten build phases with exit criteria. **The specification.** |
 | [docs/FIRST-PRINCIPLES.md](docs/FIRST-PRINCIPLES.md) | Why the design is what it is, derived from scratch: why a balance is never a fact, why double-entry falls out of conservation, what reconciliation actually is. |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Libraries vs. deployables, the one-directional dependency graph, and how it becomes a containerised service. |
-| [docs/DECISIONS.md](docs/DECISIONS.md) | The decision log — 26 entries, each with its reasoning and the alternatives rejected. Read this before changing anything structural. |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | The decision log — 42 entries, each with its reasoning and the alternatives rejected. Read this before changing anything structural. |
 | [AGENTS.md](AGENTS.md) | Engineering rules for anyone (human or agent) writing code here. |
 
 ## Where the Laws are enforced
@@ -144,9 +146,10 @@ Not in comments, and mostly not in TypeScript.
 | 2 · append-only | `BEFORE UPDATE OR DELETE` triggers on every history table, ledger and reconciliation alike |
 | 3 · integer kobo | `BIGINT` columns; `bigint` in TypeScript; amounts cast from text, never a JS number — including inside JSONB |
 | 4 · idempotency | the primary key **is** the event's idempotency key |
-| 5 · determinism | derived ids, no `randomUUID` in a write path, `asOf` always passed in, non-overlapping fee contracts |
+| 5 · determinism | derived ids, no `randomUUID` in a write path, `asOf` always passed in, non-overlapping fee contracts, versioned holiday tables, an apportionment tie-break that does not depend on iteration order |
 | 6 · cache == recompute | `verifyBalances()`, run by the demo and the property test |
 | 7 · canonical boundary | `packages/canon` is a leaf; the matcher is handed a calendar and a fee model, never a source name |
+| maker-checker | an `ApprovalPolicy` in the application, and a `CHECK` constraint that refuses self-approval in the database |
 
 Two more invariants live in the database because application code cannot be trusted with
 them: a payment can never be allocated beyond its receivable (a deferred trigger), and one

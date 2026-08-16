@@ -3,12 +3,14 @@ import type { ParseResult, StandardizedTransaction } from '@pay-normalize/core';
 import type {
   Evidence,
   Payout,
+  PaymentChannel,
+  RowLineage,
   SettlementAdjustment,
   SettlementLine,
   SettlementStatus,
   SourceId,
 } from '@recon/canon';
-import { idempotencyKey } from '@recon/canon';
+import { arrayLineage, idempotencyKey } from '@recon/canon';
 
 import { toMoney } from '../kobo.js';
 import type { RejectedRow, SettlementContext, SettlementIngestResult } from './types.js';
@@ -42,6 +44,7 @@ export function toSettlementLine(
   txn: StandardizedTransaction,
   context: SettlementContext,
   evidenceId: string,
+  lineage: RowLineage,
   payoutReference: string | null,
   hints: readonly string[] = [],
 ): Normalized {
@@ -66,6 +69,10 @@ export function toSettlementLine(
       source: txn.provider,
       payoutReference,
       merchantId: context.merchantId,
+      // The rail, as a typed field rather than only as a hint. It decides which fee
+      // contract prices this line, and a decision read out of narration is a decision made
+      // by a regex (D-010).
+      channel: txn.channel as PaymentChannel,
       gross: toMoney(txn.amountInKobo),
       fee: toMoney(txn.feeInKobo),
       net: toMoney(txn.netAmountInKobo),
@@ -73,6 +80,7 @@ export function toSettlementLine(
       settledAt: txn.settlementDate,
       reasonHints: [`channel:${txn.channel}`, ...hints],
       evidenceId,
+      lineage,
       idempotencyKey: idempotencyKey('settlement', txn.dedupeKey),
     },
   };
@@ -91,6 +99,7 @@ export function toPayout(
   txn: StandardizedTransaction,
   adjustments: readonly SettlementAdjustment[],
   evidenceId: string,
+  lineage: RowLineage,
 ): { ok: true; payout: Payout } | { ok: false; rejected: RejectedRow } {
   const raw = txn.rawProviderPayload;
 
@@ -128,6 +137,7 @@ export function toPayout(
       reportedAt: txn.occurredAt,
       valueDate: txn.settlementDate,
       evidenceId,
+      lineage,
       idempotencyKey: idempotencyKey('payout', txn.dedupeKey),
     },
   };
@@ -148,12 +158,18 @@ export function fromParseResults(
   rows: readonly ParseResult[],
   interpret: (txn: StandardizedTransaction) => RowInterpretation,
   context: SettlementContext,
+  root = '$',
 ): SettlementIngestResult {
   const payouts: Payout[] = [];
   const lines: SettlementLine[] = [];
   const rejected: RejectedRow[] = [];
 
-  for (const row of rows) {
+  // The index is the row's position in the artifact as parsed, and it is carried whether
+  // the row survives or not. "Which file?" was always answerable; "which line of it?" is
+  // what actually lets somebody reproduce a conclusion from a five-thousand-row export.
+  for (const [index, row] of rows.entries()) {
+    const lineage = arrayLineage(index, root);
+
     if (row.kind === 'parse_error') {
       rejected.push({ kind: 'malformed', reason: row.error.message, raw: row.raw });
       continue;
@@ -170,7 +186,12 @@ export function fromParseResults(
     const interpretation = interpret(row.transaction);
 
     if (interpretation.as === 'payout') {
-      const result = toPayout(row.transaction, interpretation.adjustments, evidence.evidenceId);
+      const result = toPayout(
+        row.transaction,
+        interpretation.adjustments,
+        evidence.evidenceId,
+        lineage,
+      );
       if (result.ok) payouts.push(result.payout);
       else rejected.push(result.rejected);
       continue;
@@ -180,6 +201,7 @@ export function fromParseResults(
       row.transaction,
       context,
       evidence.evidenceId,
+      lineage,
       interpretation.payoutReference,
       interpretation.hints,
     );

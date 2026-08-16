@@ -9,6 +9,8 @@ import type {
 } from '@recon/canon';
 import { adjustmentEntries, subtract, sum, ZERO } from '@recon/canon';
 
+import { apportionDeductions } from './apportion.js';
+
 /**
  * One inflow we have been told to expect, and are waiting on the bank to confirm.
  *
@@ -46,11 +48,54 @@ export interface ExpectedInflow {
   readonly evidenceId: string;
 }
 
-/** A promise, and how much of it an inflow discharges. */
-export interface InflowAllocation {
+/**
+ * A promise, and how much of it an inflow discharges.
+ *
+ * The matcher decides this much: which receivable, and how much gross of it. What the
+ * payment *cost* is a second question, answered by apportionment once the inflow's
+ * deductions are known — see `withApportionment`.
+ */
+export interface AllocationDraft {
   readonly transactionId: TransactionId;
   readonly receivable: Money;
+  /** Gross allocated: how much of the receivable this movement closes. */
   readonly amount: Money;
+}
+
+/** A draft, plus this promise's share of what the PSP took. */
+export interface InflowAllocation extends AllocationDraft {
+  /** This promise's share of each named deduction, one entry per account. */
+  readonly deductions: readonly { accountId: AccountId; amount: Money }[];
+  /** `amount − Σ deductions`: what this payment contributes to the expected credit. */
+  readonly net: Money;
+}
+
+/**
+ * Attach each promise's share of the movement's deductions.
+ *
+ * Gross allocation says which receivables a payout closed. This says what each of them
+ * cost, which is the number behind per-payment margin and every fee dispute — and it is a
+ * number we *chose*, by the rule stated in full in `apportion.ts`. Recorded rather than
+ * recomputed on demand, because the rule can change and a stored answer stays reproducible.
+ */
+export function withApportionment(
+  deductions: readonly { accountId: AccountId; amount: Money }[],
+  drafts: readonly AllocationDraft[],
+): InflowAllocation[] {
+  const shares = apportionDeductions(
+    deductions,
+    drafts.map((draft) => ({ transactionId: draft.transactionId, gross: draft.amount })),
+  );
+  const byTransaction = new Map(shares.map((share) => [share.transactionId, share]));
+
+  return drafts.map((draft) => {
+    const share = byTransaction.get(draft.transactionId);
+    return {
+      ...draft,
+      deductions: share?.deductions ?? [],
+      net: share?.net ?? draft.amount,
+    };
+  });
 }
 
 /**
@@ -63,7 +108,7 @@ export interface InflowAllocation {
  */
 export function inflowFromPayout(
   payout: Payout,
-  allocations: readonly InflowAllocation[],
+  allocations: readonly AllocationDraft[],
 ): ExpectedInflow {
   return {
     key: payout.payoutReference,
@@ -96,7 +141,7 @@ export function inflowFromLines(
   source: SourceId,
   valueDate: Date | null,
   lines: readonly SettlementLine[],
-  allocations: readonly InflowAllocation[],
+  allocations: readonly AllocationDraft[],
 ): ExpectedInflow {
   const gross = sum(allocations.map((allocation) => allocation.amount));
   const expectedNet = sum(lines.map((line) => line.net));

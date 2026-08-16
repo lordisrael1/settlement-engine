@@ -46,10 +46,14 @@ export type PolicyLookup = (source: SourceId) => SourcePolicy | null;
  */
 export const UNPROFILED_SOURCE: SourcePolicy = {
   calendar: {
-    cutOffMinutesUtc: 0,
+    // UTC and no holiday table: not a claim that the source settles in UTC, but the absence
+    // of any claim at all. Nothing waits under this calendar long enough for a zone to
+    // matter, which is the point.
+    timeZone: 'UTC',
+    cutOffMinutes: 0,
     settlementBusinessDays: 0,
     weekend: [],
-    holidays: [],
+    holidayCalendars: [],
     graceMinutes: 0,
   },
   expectedFee: null,

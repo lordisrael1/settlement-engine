@@ -1,12 +1,25 @@
 import type {
+  ApprovalPolicy,
   CanonicalPayment,
   IdempotencyKey,
   Money,
   Reference,
+  Resolution,
   SourceId,
   TransactionId,
 } from '@recon/canon';
-import { add, format, isNegative, isZero, negate, subtract, sum } from '@recon/canon';
+import {
+  add,
+  approvalFailure,
+  DEFAULT_APPROVAL_POLICY,
+  format,
+  isNegative,
+  isZero,
+  negate,
+  RESOLUTION_FORBIDDEN_ACCOUNTS,
+  subtract,
+  sum,
+} from '@recon/canon';
 
 import { LedgerError } from './errors.js';
 import { inTransaction, type Executor } from './pool.js';
@@ -66,6 +79,9 @@ export async function bookAuthorizedPayment(
     occurredAt: payment.occurredAt,
     recordedAt,
     initialState: 'authorized',
+    // The rail travels with the promise, because the fee it will attract is priced per
+    // channel and reconstructing it later from narration is guesswork.
+    channel: payment.channel,
     entries: [
       { accountId: 'psp_receivable', amount: payment.gross },
       { accountId: 'merchant_revenue', amount: negate(payment.gross) },
@@ -338,6 +354,81 @@ export async function bookReturnedPayout(
       accountId: entry.accountId,
       amount: negate(entry.amount),
     })),
+  });
+}
+
+export class UnbookableResolutionError extends LedgerError {
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/**
+ * The compensating transaction a human decision produces.
+ *
+ * An operator finds the PSP's reserve notice and concludes that a ₦1,000 "unexplained
+ * deduction" was a rolling reserve. The correct response is *not* to edit the original
+ * booking — it recorded what we knew, and what we knew was wrong, and both of those are
+ * facts. The response is a second transaction that moves ₦1,000 from `fees_expense` to
+ * `psp_reserve`, carrying its own date, its own reason, and the name of the person who
+ * concluded it. The original entries stand. An auditor sees the mistake and the correction,
+ * which is strictly more information than seeing neither.
+ *
+ * Two refusals, and both are the design rather than defensiveness:
+ *
+ *   **A resolution may not touch `bank_account`.** Cash moves on bank evidence, and a
+ *   human's conclusion is not bank evidence. An operator who believes the bank balance is
+ *   wrong has found either a statement line we have not ingested — ingest it — or a genuine
+ *   bank error, which is resolved with the bank and comes back as a statement line. Neither
+ *   is fixed by typing a number, and the moment this is allowed "once, carefully", the
+ *   three-way design is decoration.
+ *
+ *   **A resolution needing approval may not book without one.** Checked here as well as at
+ *   the point of recording, because this is the function that actually moves value and a
+ *   control enforced in only one place is one refactor away from not existing.
+ *
+ * The transaction's id is the resolution's key, so a retried request books once (Law 4).
+ */
+export async function bookResolutionAdjustment(
+  db: Executor,
+  resolution: Resolution,
+  entries: readonly EntryInput[],
+  policy: ApprovalPolicy = DEFAULT_APPROVAL_POLICY,
+): Promise<PostTransactionResult> {
+  if (entries.length === 0) {
+    throw new UnbookableResolutionError(
+      `Resolution "${resolution.resolutionKey}" has no entries to post. A decision that ` +
+        `moves nothing is recorded as a decision, not as an empty transaction.`,
+    );
+  }
+
+  const forbidden = entries.filter((entry) =>
+    RESOLUTION_FORBIDDEN_ACCOUNTS.includes(entry.accountId),
+  );
+  if (forbidden.length > 0) {
+    throw new UnbookableResolutionError(
+      `Resolution "${resolution.resolutionKey}" would move ` +
+        `${forbidden.map((entry) => format(entry.amount)).join(', ')} in and out of ` +
+        `${forbidden.map((entry) => entry.accountId).join(', ')}. Cash moves on bank ` +
+        `evidence, and a human conclusion is not bank evidence — ingest the statement line ` +
+        `that proves it, or take the correction to the bank and ingest what comes back.`,
+    );
+  }
+
+  const failure = approvalFailure(policy, resolution, true);
+  if (failure) throw new UnbookableResolutionError(failure);
+
+  return postTransaction(db, {
+    transactionId: `resolution:${resolution.resolutionKey}`,
+    source: 'resolution',
+    reference: resolution.subjectId,
+    // The decision's own timestamp, not the run's. A correction happened when the person
+    // made it, and dating it to the batch that posted it would misreport the month.
+    occurredAt: resolution.resolvedAt,
+    recordedAt: resolution.resolvedAt,
+    // Nothing further is expected of a correction; it is complete when it is posted.
+    initialState: 'settled',
+    entries: nonZero(entries),
   });
 }
 

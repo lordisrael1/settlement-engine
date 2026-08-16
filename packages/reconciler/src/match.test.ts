@@ -11,7 +11,7 @@ import type {
   SettlementAdjustment,
   SettlementLine,
 } from '@recon/canon';
-import { feeFor, money, reasonKind, ZERO } from '@recon/canon';
+import { ANY_CHANNEL, feeFor, money, NO_LINEAGE, reasonKind, ZERO } from '@recon/canon';
 
 import { allocate, confirm } from './match.js';
 import type { PolicyLookup } from './policy.js';
@@ -27,10 +27,11 @@ const VALUE_DATE = new Date('2026-08-13T09:00:00Z');
 const ASOF = new Date('2026-08-13T12:00:00Z');
 
 const CALENDAR: BusinessCalendar = {
-  cutOffMinutesUtc: 16 * 60,
+  timeZone: 'Africa/Lagos',
+  cutOffMinutes: 17 * 60,
   settlementBusinessDays: 1,
   weekend: [0, 6],
-  holidays: [],
+  holidayCalendars: [],
   graceMinutes: 24 * 60,
 };
 
@@ -42,9 +43,15 @@ const CARD = {
   vatBasisPoints: 750,
 };
 
+const CARD_CONTRACT = {
+  contractId: 'test-contract',
+  channel: ANY_CHANNEL,
+  effectiveFrom: new Date(0),
+} as const;
+
 const policy: PolicyLookup = () => ({
   calendar: CALENDAR,
-  expectedFee: (gross) => feeFor(CARD, gross, 'test-contract'),
+  expectedFee: (gross) => feeFor(CARD, gross, CARD_CONTRACT),
   bankChargeAllowance: 10_000n, // ₦100
 });
 
@@ -60,6 +67,7 @@ function promise(id: string, gross: bigint, occurredAt = T0): LedgerTransaction 
     state: 'authorized',
     source: 'alpha',
     reference: id,
+    channel: 'card',
     occurredAt,
     recordedAt: occurredAt,
     entries: [
@@ -90,6 +98,7 @@ function payout(
     reportedAt: VALUE_DATE,
     valueDate: VALUE_DATE,
     evidenceId: 'evidence-1',
+    lineage: NO_LINEAGE,
     idempotencyKey: `payout:alpha:${reference}`,
   };
 }
@@ -116,6 +125,7 @@ function credit(
     narrationTokens: narration.toUpperCase().match(/[A-Z0-9][A-Z0-9_-]{5,}/g) ?? [],
     statedReference: null,
     evidenceId: 'evidence-bank',
+    lineage: NO_LINEAGE,
     idempotencyKey: key,
   };
 }
@@ -568,6 +578,121 @@ test('a source with no profile escalates rather than waiting forever', () => {
 
   assert.equal(result.deferred.length, 0);
   assert.equal(only(result.exceptions).reason, 'MISSING_SETTLEMENT');
+});
+
+// ── Apportionment ───────────────────────────────────────────────────────────
+
+/**
+ * The question gross allocation cannot answer: what did *this* payment cost?
+ *
+ * The PSP charged the batch, not the payments, so any per-payment number is a rule we
+ * chose — pro rata by gross, largest remainder, ties by transaction id. The rule is stated
+ * in `apportion.ts`; this is the rule doing its job.
+ */
+test('a batch fee is split across the payments it was charged on', () => {
+  const result = allocateWith(
+    [promise('pay-1', 300_000n), promise('pay-2', 700_000n)],
+    [payout('PO-E', 1_000_000n, [deduction('fee', 15_000n), deduction('tax', 1_125n)])],
+  );
+
+  const allocations = result.prepared[0]!.allocations;
+  assert.deepEqual(
+    allocations.map((a) => [a.transactionId, a.amount.kobo, a.net.kobo]),
+    [
+      // ₦150 fee splits ₦45 / ₦105. The ₦11.25 tax splits 337.5 / 787.5 kobo, and the
+      // spare kobo goes to `pay-1` — equal remainders, tie broken by transaction id.
+      ['pay-1', 300_000n, 295_162n], // 300,000 − 4,500 − 338
+      ['pay-2', 700_000n, 688_713n], // 700,000 − 10,500 − 787
+    ],
+  );
+
+  // Each deduction adds back to its own total exactly — no kobo invented, none lost.
+  const shareOf = (accountId: string) =>
+    allocations
+      .flatMap((a) => a.deductions)
+      .filter((d) => d.accountId === accountId)
+      .reduce((total, d) => total + d.amount.kobo, 0n);
+
+  assert.equal(shareOf('fees_expense'), 15_000n);
+  assert.equal(shareOf('taxes_withheld'), 1_125n);
+});
+
+/**
+ * The kobo that will not divide has to go somewhere, and "wherever the map iterated first"
+ * is not a decision anybody can reproduce. Largest remainder decides, and the transaction id
+ * breaks the tie — so the same inputs always hand the same kobo to the same payment (Law 5).
+ */
+test('an indivisible kobo is given away by a rule, not by iteration order', () => {
+  const forward = allocateWith(
+    [promise('pay-a', 100_000n), promise('pay-b', 100_000n), promise('pay-c', 100_000n)],
+    [payout('PO-F', 300_000n, [deduction('fee', 100n)])], // ₦1 across three equal payments
+  );
+  const backward = allocateWith(
+    [promise('pay-c', 100_000n), promise('pay-b', 100_000n), promise('pay-a', 100_000n)],
+    [payout('PO-F', 300_000n, [deduction('fee', 100n)])],
+  );
+
+  const shares = (result: ReturnType<typeof allocateWith>) =>
+    result.prepared[0]!.allocations.map((a) => [a.transactionId, a.net.kobo]);
+
+  assert.deepEqual(shares(forward), [
+    ['pay-a', 99_966n], // 34 kobo — the spare one, by id
+    ['pay-b', 99_967n],
+    ['pay-c', 99_967n],
+  ]);
+  assert.deepEqual(shares(backward), shares(forward), 'input order changes nothing');
+});
+
+// ── The contract that explained it ──────────────────────────────────────────
+
+/**
+ * Rates are renegotiated and rate cards are corrected. Recomputing a March decision against
+ * today's table can reach a different answer than the one we acted on — which is exactly
+ * what effective-dated contracts exist to prevent — so the contract that priced each
+ * promise is recorded with the conclusion rather than re-derived from it.
+ */
+test('a conclusion names the fee contract that explained each promise', () => {
+  const result = allocateWith(
+    [promise('pay-1', 1_000_000n)],
+    [payout('PO-G', 1_000_000n, [deduction('fee', 15_000n)])],
+  );
+
+  assert.deepEqual(result.prepared[0]!.result.explainedBy, [
+    {
+      transactionId: 'pay-1',
+      contractId: 'test-contract',
+      channel: ANY_CHANNEL,
+      expectedFee: money(15_000n),
+      expectedVat: money(1_125n),
+      // What it actually cost: this promise's share of the batch fee.
+      observedFee: money(15_000n),
+    },
+  ]);
+});
+
+/**
+ * "We matched this on amounts alone" is a conclusion, and a conclusion left unwritten is
+ * indistinguishable later from one nobody reached. So a promise no contract covered is
+ * explained explicitly, with a null contract rather than an absent explanation.
+ */
+test('a promise no contract covers is explained as exactly that', () => {
+  const result = allocateWith(
+    [promise('pay-1', 1_000_000n)],
+    [payout('PO-H', 1_000_000n, [deduction('fee', 15_000n)])],
+    [],
+    noRateCard,
+  );
+
+  assert.deepEqual(result.prepared[0]!.result.explainedBy, [
+    {
+      transactionId: 'pay-1',
+      contractId: null,
+      channel: null,
+      expectedFee: null,
+      expectedVat: null,
+      observedFee: money(15_000n),
+    },
+  ]);
 });
 
 test('an inflow with no deductions still balances', () => {

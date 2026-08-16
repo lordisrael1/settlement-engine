@@ -43,12 +43,39 @@ export function supersedes(incoming: PaymentStatus, current: PaymentStatus): boo
   return STATUS_RANK[incoming] > STATUS_RANK[current];
 }
 
+/**
+ * How the money moved.
+ *
+ * Spelled to match `PaymentChannel` in `@pay-normalize/core`, for the same reason
+ * `PaymentStatus` is: two vocabularies for one concept is what this package exists to
+ * prevent.
+ *
+ * `'unknown'` is a legitimate value, not a failure. Several sources do not disclose the
+ * channel, and inferring one from the amount would be a guess that later prices a fee — so
+ * an unknown channel is carried as unknown and priced by a contract that covers every
+ * channel, or by none at all.
+ */
+export type PaymentChannel =
+  | 'card'
+  | 'bank_transfer'
+  | 'ussd'
+  | 'qr'
+  | 'wallet'
+  | 'pos'
+  | 'unknown';
+
 export interface CanonicalPayment {
   readonly reference: Reference;
   readonly source: SourceId;
   /** What the customer paid, before any fee. */
   readonly gross: Money;
   readonly status: PaymentStatus;
+  /**
+   * Which rail carried it. Priced differently by every Nigerian PSP — card and transfer
+   * are rarely the same rate — so it travels with the payment rather than being
+   * reconstructed later from narration.
+   */
+  readonly channel: PaymentChannel;
   /** When the payment happened at the source. Drives the settlement window. */
   readonly occurredAt: Date;
   readonly idempotencyKey: IdempotencyKey;
