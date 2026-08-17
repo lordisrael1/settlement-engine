@@ -90,8 +90,8 @@ balance equals its recomputed balance and the whole ledger still sums to zero), 
 | 1 · The ledger core | ✅ | [`packages/ledger-core`](packages/ledger-core) |
 | 2 · The ingest layer | ✅ | [`packages/ingest`](packages/ingest) — three halves: webhooks, PSP reports, bank statements |
 | 3 · The reconciliation engine | ✅ | [`packages/reconciler`](packages/reconciler) — three-way, see D-027 |
-| 4 · Exceptions and settlement windows | — | the state machine and the queue; the calendar and the resolution trail already exist |
-| 5 · Event sourcing and replay | — | |
+| 4 · Exceptions and settlement windows | ✅ | [`packages/reconciler/src/exceptions.ts`](packages/reconciler/src/exceptions.ts) — an appended lifecycle, a self-clearing queue, and the candidates the matcher rejected |
+| 5 · Event sourcing and replay | ✅ | [`packages/ledger-core/src/replay.ts`](packages/ledger-core/src/replay.ts) — a log written beside the ledger and folded back to prove it, see D-047 |
 | 6 · The API and the service | — | [`apps/api`](apps/api) |
 | 7 · Containerisation | ✅ | [`Dockerfile`](Dockerfile), [`docker-compose.yml`](docker-compose.yml) — brought forward, see D-022 |
 | 8 · Testing and chaos | partial | property, idempotency and invariant tests exist; the adversarial simulator is Phase 8 |
@@ -109,9 +109,13 @@ calendar with a named time zone, cut-offs, weekends and versioned Nigerian holid
 Every record traces to the SHA-256 of the file it came from and to the row inside it, and a
 human correction is an approved, appended decision that posts its own compensating entry.
 
-**What does not exist yet** is the exception *state machine* and the queue a human works
-from — the findings are produced and recorded, but nothing yet moves them through
-`overdue → exception → resolved`. That is Phase 4.
+Unexplained findings become durable queue items that deduplicate across runs, escalate when
+their window passes, and close themselves when the evidence finally arrives — each carrying
+the near-misses the matcher rejected. Everything that happens is also appended to one ordered
+event log, which `replay` folds from genesis to prove the balances can be rebuilt from it.
+
+**What does not exist yet** is the HTTP service: the engine is reachable through a CLI, not
+over a contract, and no webhook arrives by network. That is Phase 6.
 
 ## Layout
 
@@ -133,7 +137,7 @@ Dependencies point one way only, downward toward `canon`. No cycles.
 | [docs/RECONCILIATION-BIBLE.md](docs/RECONCILIATION-BIBLE.md) | The doctrine: core beliefs, the seven Laws, target attributes, and the ten build phases with exit criteria. **The specification.** |
 | [docs/FIRST-PRINCIPLES.md](docs/FIRST-PRINCIPLES.md) | Why the design is what it is, derived from scratch: why a balance is never a fact, why double-entry falls out of conservation, what reconciliation actually is. |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Libraries vs. deployables, the one-directional dependency graph, and how it becomes a containerised service. |
-| [docs/DECISIONS.md](docs/DECISIONS.md) | The decision log — 42 entries, each with its reasoning and the alternatives rejected. Read this before changing anything structural. |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | The decision log — 48 entries, each with its reasoning and the alternatives rejected. Read this before changing anything structural. |
 | [AGENTS.md](AGENTS.md) | Engineering rules for anyone (human or agent) writing code here. |
 
 ## Where the Laws are enforced
@@ -147,7 +151,7 @@ Not in comments, and mostly not in TypeScript.
 | 3 · integer kobo | `BIGINT` columns; `bigint` in TypeScript; amounts cast from text, never a JS number — including inside JSONB |
 | 4 · idempotency | the primary key **is** the event's idempotency key |
 | 5 · determinism | derived ids, no `randomUUID` in a write path, `asOf` always passed in, non-overlapping fee contracts, versioned holiday tables, an apportionment tie-break that does not depend on iteration order |
-| 6 · cache == recompute | `verifyBalances()`, run by the demo and the property test |
+| 6 · cache == recompute | `verifyBalances()`, run by the demo and the property test; and `replay()`, which folds the event log and checks the entries, the cache and the log against each other |
 | 7 · canonical boundary | `packages/canon` is a leaf; the matcher is handed a calendar and a fee model, never a source name |
 | maker-checker | an `ApprovalPolicy` in the application, and a `CHECK` constraint that refuses self-approval in the database |
 

@@ -42,6 +42,10 @@ export async function reverse(
       // A compensating transaction has no promise-to-money gap of its own — there is no
       // later settlement to wait for — so it is born in a terminal state.
       initialState: 'settled',
+      // The primitive, not the domain event: this says a transaction was cancelled, and
+      // says nothing about why. `bookReversal` is the one that means "a payment was
+      // refunded", and the log keeps them apart.
+      event: { type: 'TransactionReversed', causedBy: transactionId },
       entries: original.entries.map((entry) => ({
         accountId: entry.accountId,
         amount: negate(entry.amount),

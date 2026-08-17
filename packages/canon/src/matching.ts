@@ -116,6 +116,46 @@ export function reasonKind(reason: ReasonCode): ReasonKind {
   return REASON_KIND[reason];
 }
 
+/**
+ * One candidate the matcher looked at and did not take, and why.
+ *
+ * This is the working, kept. A `PHANTOM_CREDIT` whose queue entry says "₦12,000 with no
+ * promise" is a mystery; one that adds "the nearest promise was ₦11,950, rejected because
+ * the amounts differ by ₦50, and one other was ₦12,000 but is already claimed by PO-98" is
+ * a decision somebody can make in a minute.
+ *
+ * Bounded on purpose — see `MAX_CANDIDATES`. A list of every promise in the ledger is not
+ * an explanation, it is a haystack with a note attached.
+ */
+export interface RejectedCandidate {
+  /** What was considered: a transaction id, a payout reference, a settlement or bank key. */
+  readonly candidateId: string;
+  /** Which of the four record kinds it is. Spelled to match `ExceptionSubject`. */
+  readonly kind: 'payout' | 'bank_credit' | 'transaction' | 'settlement_line';
+  /** How far off it was, where the mismatch was an amount. `null` when it was not. */
+  readonly difference: Money | null;
+  /** Why it lost, in the matcher's own terms. */
+  readonly rejectedBecause: RejectionReason;
+}
+
+export type RejectionReason =
+  /** The amounts did not agree, and no fee contract explained the gap. */
+  | 'amount_differs'
+  /** Dated outside the movement's settlement window, or credited before it was sent. */
+  | 'outside_window'
+  /** Already spoken for by an earlier allocation or confirmation. */
+  | 'already_claimed'
+  /** It fitted — and so did something else, equally well. Taking either would be a guess. */
+  | 'ambiguous'
+  /** The reference matched but the lifecycle did not: a clawback against an unsettled promise. */
+  | 'wrong_state';
+
+/**
+ * Four is a judgement, not a truth. It is enough to show the shape of the near-miss and few
+ * enough that a queue entry stays readable at a glance.
+ */
+export const MAX_CANDIDATES = 4;
+
 /** How sure the matcher is, from `0` to `1`. Tier 1 matches are `1`. */
 export type Confidence = number;
 
@@ -169,15 +209,21 @@ export interface MatchResult {
    * it, which is a different thing and is recorded as one.
    */
   readonly explainedBy: readonly FeeExplanation[];
+  /**
+   * What was looked at and not taken. Populated for conclusions that failed to match,
+   * empty for the ones that succeeded — a match has no near-miss worth reporting.
+   */
+  readonly considered: readonly RejectedCandidate[];
   readonly reason: ReasonCode;
   readonly confidence: Confidence;
 }
 
-/** An empty result to spread over — five list fields is four too many to retype. */
+/** An empty result to spread over — six list fields is five too many to retype. */
 export const NO_LINKS = {
   transactionIds: [] as readonly TransactionId[],
   settlementKeys: [] as readonly IdempotencyKey[],
   payoutReferences: [] as readonly PayoutReference[],
   bankCreditKeys: [] as readonly IdempotencyKey[],
   explainedBy: [] as readonly FeeExplanation[],
+  considered: [] as readonly RejectedCandidate[],
 } as const;

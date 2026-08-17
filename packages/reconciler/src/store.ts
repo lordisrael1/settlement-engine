@@ -20,7 +20,7 @@ import type {
 } from '@recon/canon';
 import { approvalFailure, DEFAULT_APPROVAL_POLICY, money, ZERO } from '@recon/canon';
 import type { EntryInput, Executor } from '@recon/ledger-core';
-import { bookResolutionAdjustment, inTransaction } from '@recon/ledger-core';
+import { appendEvent, bookResolutionAdjustment, inTransaction } from '@recon/ledger-core';
 
 import type { ExpectedInflow, InflowAllocation } from './inflow.js';
 
@@ -207,7 +207,25 @@ export async function recordPayouts(
           payout.lineage.path,
         ],
       );
-      stored += result.rowCount ?? 0;
+      if ((result.rowCount ?? 0) === 0) continue;
+      stored += 1;
+
+      // A claim, logged as a claim. It moves no money, carries no entries, and folding it
+      // into the balances adds exactly nothing — which is the correct answer for a PSP
+      // describing its own future behaviour.
+      await appendEvent(client, {
+        type: 'PayoutReported',
+        subject: payout.payoutReference,
+        source: payout.source,
+        occurredAt: payout.valueDate ?? payout.reportedAt,
+        recordedAt: payout.reportedAt,
+        detail: {
+          gross_kobo: kobo(payout.gross),
+          expected_net_kobo: kobo(payout.expectedNet),
+          evidence_id: payout.evidenceId,
+        },
+        causedBy: payout.evidenceId,
+      });
     }
   });
   return { stored, duplicates: payouts.length - stored };
@@ -249,8 +267,34 @@ export async function recordSettlementLines(
       );
       stored += result.rowCount ?? 0;
     }
+
+    // One event per *file*, not per line. A five-thousand-row export is one thing that
+    // happened; logging five thousand events would bury every other happening in the
+    // system under it, and the lines themselves are already stored and traceable.
+    const first = lines[0];
+    if (first && stored > 0) {
+      await appendEvent(client, {
+        type: 'SettlementIngested',
+        subject: first.evidenceId,
+        source: first.source,
+        occurredAt: first.settledAt ?? recordedAtOf(lines),
+        recordedAt: recordedAtOf(lines),
+        detail: { lines: stored, evidence_id: first.evidenceId },
+      });
+    }
   });
   return { stored, duplicates: lines.length - stored };
+}
+
+/**
+ * When a batch of records was learned of.
+ *
+ * Taken from the records rather than from a clock, because a clock read here would make the
+ * same file ingested twice produce two different logs (Law 5).
+ */
+function recordedAtOf(lines: readonly { settledAt: Date | null }[]): Date {
+  const dated = lines.map((line) => line.settledAt).filter((at): at is Date => at !== null);
+  return dated.length === 0 ? new Date(0) : new Date(Math.max(...dated.map((at) => at.getTime())));
 }
 
 export async function recordBankLines(
@@ -286,8 +330,27 @@ export async function recordBankLines(
       );
       stored += result.rowCount ?? 0;
     }
+
+    const first = lines[0];
+    if (first && stored > 0) {
+      await appendEvent(client, {
+        type: 'BankStatementIngested',
+        subject: first.evidenceId,
+        // The bank is a party that sends us records, and giving it the same kind of
+        // identifier as a PSP keeps the log uniform.
+        source: first.bankAccountId,
+        occurredAt: latestValueDate(lines),
+        recordedAt: latestValueDate(lines),
+        detail: { lines: stored, bank_account_id: first.bankAccountId },
+      });
+    }
   });
   return { stored, duplicates: lines.length - stored };
+}
+
+/** The newest value date in a statement — when it is current *to*, taken from the file. */
+function latestValueDate(lines: readonly BankStatementLine[]): Date {
+  return new Date(Math.max(...lines.map((line) => line.valueDate.getTime())));
 }
 
 /** Payouts no expected inflow has been built from yet. */
@@ -486,6 +549,22 @@ export async function saveInflow(
     );
     if (inserted.rowCount === 0) return;
 
+    // Promises matched to a movement. Still not money — no entries, so folding it into the
+    // balances adds nothing, which is exactly what stage two does to the books.
+    await appendEvent(client, {
+      type: 'InflowAllocated',
+      subject: inflow.key,
+      source: inflow.source,
+      occurredAt: inflow.valueDate ?? reportedAt,
+      recordedAt: reportedAt,
+      detail: {
+        expected_net_kobo: kobo(inflow.expectedNet),
+        promises: allocations.map((allocation) => allocation.transactionId),
+        derived: inflow.derived,
+      },
+      causedBy: inflow.evidenceId,
+    });
+
     for (const allocation of allocations) {
       await client.query(
         `INSERT INTO inflow_allocations
@@ -562,6 +641,64 @@ export async function openInflows(db: Executor, limit = 1000): Promise<ExpectedI
     settlementKeys: keysByInflow.get(row.inflow_key) ?? [],
     evidenceId: row.evidence_id,
   }));
+}
+
+/**
+ * Inflows a bank credit has already confirmed.
+ *
+ * Not candidates for anything — evidence. Two of the three bank-side exceptions are *about*
+ * money we have already banked: a payout credited twice, and a payout credited and then
+ * taken back. Without these, both arrive at the matcher looking like money nobody can
+ * identify, which is true and useless.
+ *
+ * `credited` is what the bank actually paid, read from the confirming transaction's own
+ * `bank_account` entry rather than from what the PSP said it would send. A return reverses
+ * what arrived, not what was promised.
+ */
+export async function confirmedInflows(
+  db: Executor,
+  limit = 1000,
+): Promise<
+  {
+    key: string;
+    source: SourceId;
+    credited: Money;
+    confirmedBy: string;
+    valueDate: Date | null;
+  }[]
+> {
+  const result = await db.query<{
+    inflow_key: string;
+    source: string;
+    confirmed_by: string;
+    credited: string | null;
+    value_date: Date | null;
+  }>(
+    `SELECT i.inflow_key, i.source, i.confirmed_by, i.value_date,
+            (SELECT SUM(e.amount_kobo)::text
+               FROM entries e
+              WHERE e.transaction_id = i.confirmed_by AND e.account_id = 'bank_account')
+              AS credited
+       FROM expected_inflows i
+       -- A payout already returned is finished: the money came and went, both halves are
+       -- recorded, and a second debit is not another return of the same thing.
+       LEFT JOIN payouts p ON p.payout_reference = i.inflow_key
+      WHERE i.confirmed_by IS NOT NULL
+        AND (p.status IS NULL OR p.status <> 'returned')
+      ORDER BY i.inflow_key
+      LIMIT $1`,
+    [limit],
+  );
+
+  return result.rows
+    .filter((row) => row.credited !== null)
+    .map((row) => ({
+      key: row.inflow_key,
+      source: row.source,
+      credited: fromKobo(row.credited),
+      confirmedBy: row.confirmed_by,
+      valueDate: row.value_date,
+    }));
 }
 
 /**
@@ -807,6 +944,27 @@ export async function recordResolution(
         booked?.transactionId ?? null,
       ],
     );
+
+    // The decision, logged whether or not it moved value. A resolution that books an entry
+    // already appears in the log through `postTransaction`; this is the one that does not,
+    // and leaving it out would make half the human decisions invisible to a replay.
+    if (inserted.rowCount !== 0 && entries.length === 0) {
+      await appendEvent(client, {
+        type: 'ResolutionRecorded',
+        subject: resolution.resolutionKey,
+        occurredAt: resolution.resolvedAt,
+        recordedAt: resolution.resolvedAt,
+        detail: {
+          action: resolution.action,
+          subject: resolution.subject,
+          subject_id: resolution.subjectId,
+          resolved_by: resolution.resolvedBy,
+          approved_by: resolution.approvedBy,
+          amount_kobo: resolution.amount ? kobo(resolution.amount) : null,
+        },
+        causedBy: resolution.subjectId,
+      });
+    }
 
     // No row back means the key was already there: a retried request, whose booking also
     // collided on its own primary key and posted nothing a second time. Nothing to do, and

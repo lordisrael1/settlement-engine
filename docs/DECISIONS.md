@@ -900,3 +900,164 @@ strictly more than seeing neither.
 **Cost accepted.** Identities, permissions and an approval UI, which remain Phase 6's
 problem. The rule, the key and the posting path exist now so that Phase 4's exception queue
 has somewhere honest to write.
+
+---
+
+## D-043 · 2026-08-17 · An exception is an entity with an appended lifecycle and a derived key
+
+**Decision.** Findings that reach `exception` become rows in `exception_events` — append-only
+— with the current state derived by a view taking the newest event per key. The key is
+`(subject, subjectId, reason)`, derived rather than generated. States are
+`open → acknowledged → resolved`.
+
+**Why an entity.** Phase 3 could say what was wrong *now*. It could not say that the same
+thing had been wrong since Tuesday, that somebody was already looking at it, or that it had
+quietly fixed itself. Every run started from nothing and reported everything, which is a
+report and not a queue.
+
+**Why a derived key.** Without it the queue grows by the number of runs rather than the
+number of problems, and nobody opens it by Thursday. Derivation is also what lets a replay
+reach the same keys as the run it replays (Law 5).
+
+**Why events and a view rather than a `state` column.** A mutable state column is an
+`UPDATE`, and `UPDATE`s are how history gets quietly rewritten. The ledger refuses that for
+its own transactions — `transaction_state_changes` plus the `transaction_states` view — and
+there is no argument for allowing it for the judgements *about* those transactions. The
+shape here is deliberately the same one, so anybody who has read the ledger already knows
+how to read this.
+
+**On reopening.** An exception that resolved and is found again appends a reopening rather
+than being treated as never having closed. A difference that comes back is not the same
+event as one that never went away, and flattening the two would hide the most useful signal
+the table holds: which problems recur.
+
+**Cost accepted.** A view rather than a table on the read path, and a state machine somebody
+has to keep in their head. `severityOf` sorts the queue by what the problem *is* rather than
+when it arrived, because a queue sorted by arrival buries the alarming things under a week
+of routine ones.
+
+---
+
+## D-044 · 2026-08-17 · The queue clears itself, by diffing each run's findings against what is open
+
+**Decision.** After each run, exceptions the run no longer finds are resolved with cause
+`evidence_arrived`. Scoped by subject kind, so a run that had nothing to say about a subject
+does not close its problems.
+
+**Why.** This is the doctrine's own exit criterion for Phase 4: a T+1 straggler sits as
+pending, escalates when its window passes, and clears itself when the settlement file lands —
+with nobody woken for any of it. Without the diff, the queue only ever grows, which is the
+same as not having one.
+
+**Why the cause is mandatory.** `exception_events` refuses a resolution with no cause, by
+constraint. That single field is what lets the table answer the question it exists for: *how
+much of this queue clears itself?* A queue where that number is high is one whose calendar is
+tuned correctly; where it is low, either the calendar is wrong or something real is
+happening. Recording closure without cause makes both indistinguishable.
+
+**Why machine and human closure are different causes.** `evidence_arrived` and
+`resolved_by_human` are the same outcome reached two ways, and conflating them would hide
+how much human time the queue actually costs.
+
+**On scoping.** Treating silence as "resolved" would close problems that are still entirely
+real. Every run currently reads all three records and so may speak to all four subjects; a
+future partial run must narrow the scope, and the parameter exists so that it can.
+
+---
+
+## D-045 · 2026-08-17 · The matcher keeps the candidates it rejected
+
+**Decision.** `MatchResult.considered` carries up to four near-misses, each with the amount
+it was out by and why it lost — `amount_differs`, `outside_window`, `already_claimed`,
+`ambiguous`, `wrong_state`. It is persisted with the exception.
+
+**Why.** The doctrine asks for exceptions surfaced with "the candidate explanations the
+matcher considered and rejected", and the reason is practical. "₦12,000 credited, matches
+nothing" is a mystery an operator has to reconstruct from scratch. "The nearest was PO-91 at
+₦11,950 — ₦50 out — and PO-88 fits exactly but is already claimed by another credit" is a
+decision they can make now. The matcher has already done that work; throwing it away and
+making a human redo it by hand is the expensive part of an exception queue.
+
+**Why bounded.** A list of every open inflow is not an explanation, it is a haystack with a
+note attached. Four is a judgement: enough to show the shape of the near-miss, few enough
+that a queue entry stays readable at a glance.
+
+**Cost accepted.** A little more work on the failure path, and a JSONB column. Both are paid
+only when something is already wrong.
+
+---
+
+## D-046 · 2026-08-17 · `RETURNED_PAYOUT` and `DUPLICATE_BANK_CREDIT` are produced, not merely declared
+
+**Decision.** Stage three no longer filters the statement down to credits. A debit matching a
+banked payout books an exact negation of the confirming transaction and marks the payout
+`returned`; a second credit for money already banked is reported as a duplicate rather than
+as unidentified. `confirm` takes the already-confirmed inflows as evidence for both.
+
+**Why.** Both reason codes existed from Phase 3 and neither was reachable, as were
+`bookReturnedPayout` and `markPayoutReturned`. A returned payout is the most alarming thing
+a bank statement can say — we booked the money, told everyone the payment had settled, and
+it bounced — and it arrives as a *debit*, which a credits-only stage three cannot see at all.
+
+**On the duplicate.** Both outcomes refuse to book, so no money moves either way; the
+difference is entirely in what the human is told. "We appear to have been paid this twice,
+here is the first credit" is a morning's work. "Money we cannot identify" files the most
+consequential bank event in the system beside a stray ₦42 credit.
+
+**On exactness.** A return must match the credited amount exactly, and unnamed returns are
+taken only when exactly one banked payout fits. A partial return is not a thing that happens,
+and unwinding a settlement on an approximate match would be worse than escalating.
+
+---
+
+## D-047 · 2026-08-17 · The event log is written beside the ledger, not instead of it
+
+**Decision.** An append-only `events` table records every domain happening, written **in the
+same database transaction** as the state change that causes it. `replay` folds it from event
+zero and asserts the projections match; `rebuildBalancesFromEvents` discards the balance
+cache and rebuilds it from the fold. The ledger remains the write path.
+
+**Why this deviates from the doctrine, deliberately.** The bible says the log becomes the
+true system of record and the ledger becomes a projection folded from it. Taken literally
+that inverts Phase 1 and moves Law 1 out of the database: today an unbalanced transaction is
+refused by a deferred constraint trigger at `COMMIT`, which a rogue script, a migration, or a
+second service cannot walk past. Under a log-first design the primary write is an event
+insert and "balanced" becomes something application code promises. For a financial ledger
+that trades a database-enforced invariant for an application-enforced one, which is strictly
+worse — and the whole reason the Laws live in Postgres rather than in TypeScript.
+
+**What is gained instead.** Everything the doctrine actually wanted: one ordered narrative
+from genesis, replayable, with the balances rebuildable from it. And one thing a log-first
+design cannot have. When the log is the only writer, replaying it can only reproduce itself —
+the fold agrees with the projection because the projection came from the fold, and a bug in
+the writer is invisible. Here the entries and the log are written by different code in the
+same transaction, so agreement is *evidence*: two bugs would have to agree exactly to escape
+notice. `replay` therefore checks three independent records — the entries, the balance cache,
+and the log — and reports which pair disagrees, which localises a fault rather than merely
+announcing one.
+
+**Cost accepted.** Every booking now carries its entries twice, in two shapes. That is real
+duplication, and it is the price of the cross-check being meaningful.
+
+**On what must not drift.** A transaction posted with no event is invisible to the fold, so
+the fold notices: the entry-level check catches exactly that, and there is a test for it. The
+same discipline applies to any booking function added later.
+
+---
+
+## D-048 · 2026-08-17 · The log opens with a genesis event
+
+**Decision.** Migration `0006` writes one `LedgerOpened` event carrying the per-account
+position as it stood at adoption, and one `ExceptionRaised` per exception open at that
+moment. On a fresh database neither is written.
+
+**Why.** A log that begins today cannot explain a ledger that began last year. Every
+transaction written before the migration exists in `entries` and nowhere in `events`, so a
+replay would fold to zero and report every account as drifted — correctly, and uselessly. An
+opening balance is what any other set of books does with the same problem, and saying "this
+is where the narrative starts, and here is what was already true" is more honest than a tool
+that only works on databases with no history.
+
+**Cost accepted.** The first event is not derived from anything the log itself contains, so
+the period before adoption is attested rather than reconstructed. That is unavoidable and is
+stated in the event's own `detail` rather than left for somebody to infer.

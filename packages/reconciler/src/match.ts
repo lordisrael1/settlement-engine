@@ -2,12 +2,14 @@ import type {
   AccountId,
   BankStatementLine,
   FeeExplanation,
+  IdempotencyKey,
   LedgerTransaction,
   MatchResult,
   Money,
   PaymentChannel,
   Payout,
   Reference,
+  RejectedCandidate,
   SettlementLine,
   SourceId,
   TransactionId,
@@ -17,6 +19,7 @@ import {
   equals,
   isCredit,
   isOverdue,
+  MAX_CANDIDATES,
   NO_LINKS,
   payoutArithmetic,
   subtract,
@@ -231,6 +234,10 @@ export function allocate(input: AllocateInput): AllocateResult {
         payoutReferences: [payout.payoutReference],
         reason: 'PHANTOM_CREDIT',
         confidence: CONFIDENCE.none,
+        // What the subset search looked at. A payout that matches no combination is the
+        // finding most likely to be a data problem rather than a fraud, and the promises it
+        // came closest to are what tells the two apart.
+        considered: nearestPromises(payout.gross, inReach, payout.valueDate, policy(payout.source), stillOwed),
       });
       continue;
     }
@@ -298,6 +305,15 @@ export function allocate(input: AllocateInput): AllocateResult {
         settlementKeys: [line.idempotencyKey],
         reason: 'PHANTOM_CREDIT',
         confidence: CONFIDENCE.none,
+        // Two promises sharing one reference, or one already fully spoken for. Both are
+        // ordinary data problems, and naming which is which saves the reader the query.
+        considered: candidates.slice(0, MAX_CANDIDATES).map((candidate) => ({
+          candidateId: candidate.transactionId,
+          kind: 'transaction' as const,
+          difference: subtract(line.gross, candidate.gross),
+          rejectedBecause:
+            candidates.length > 1 ? ('ambiguous' as const) : ('already_claimed' as const),
+        })),
       });
       continue;
     }
@@ -310,6 +326,14 @@ export function allocate(input: AllocateInput): AllocateResult {
         settlementKeys: [line.idempotencyKey],
         reason: 'AMOUNT_MISMATCH',
         confidence: CONFIDENCE.none,
+        considered: [
+          {
+            candidateId: promise.transactionId,
+            kind: 'transaction',
+            difference: subtract(line.gross, promise.gross),
+            rejectedBecause: 'wrong_state',
+          },
+        ],
       });
       continue;
     }
@@ -415,9 +439,31 @@ export function allocate(input: AllocateInput): AllocateResult {
 
 // ── Stage three: the bank statement meets the PSP's report ──────────────────
 
+/**
+ * An inflow a bank credit already confirmed, in this run or an earlier one.
+ *
+ * Stage three needs these even though there is nothing left to do with them, because two of
+ * the three bank-side exceptions are *about* them: a payout credited twice, and a payout
+ * credited and then taken back. Without this, both look like money nobody can identify —
+ * which is true but useless, and describes the wrong problem.
+ */
+export interface ConfirmedInflow {
+  readonly key: string;
+  readonly source: SourceId;
+  /** What actually landed, per the bank — not what the PSP said would land. */
+  readonly credited: Money;
+  readonly confirmedBy: IdempotencyKey;
+  readonly valueDate: Date | null;
+}
+
 export interface ConfirmInput {
   /** Inflows recorded by stage two that no bank credit has confirmed yet. */
   readonly inflows: readonly ExpectedInflow[];
+  /**
+   * Inflows already confirmed. Not candidates — evidence for recognising a second credit
+   * for money we have already banked, and a debit taking one of them back.
+   */
+  readonly confirmedInflows?: readonly ConfirmedInflow[];
   readonly bankLines: readonly BankStatementLine[];
   readonly policyFor: PolicyLookup;
   readonly asOf: Date;
@@ -431,10 +477,27 @@ export interface Confirmation {
   readonly result: MatchResult;
 }
 
+/**
+ * Cash that arrived and then left again.
+ *
+ * The most alarming thing a bank statement can say, and the one the two-way design could
+ * not see at all: we booked the money, told everyone the payment had settled, and the
+ * payout bounced. It is recognised from a *debit*, which is why stage three cannot simply
+ * filter the statement down to credits.
+ */
+export interface ReturnedPayout {
+  readonly inflow: ConfirmedInflow;
+  /** The statement line that took it back. */
+  readonly debit: BankStatementLine;
+  readonly result: MatchResult;
+}
+
 export interface ConfirmResult {
   readonly asOf: Date;
   /** These book. Nothing else in the system does. */
   readonly confirmed: readonly Confirmation[];
+  /** These book too — as an exact negation of the confirmation they undo. */
+  readonly returned: readonly ReturnedPayout[];
   readonly deferred: readonly MatchResult[];
   readonly exceptions: readonly MatchResult[];
 }
@@ -442,15 +505,23 @@ export interface ConfirmResult {
 export function confirm(input: ConfirmInput): ConfirmResult {
   const policy = (source: SourceId): SourcePolicy => policyOf(input.policyFor, source);
 
-  const credits = [...input.bankLines]
-    .filter(isCredit)
-    .sort(byKey((line) => line.idempotencyKey));
+  const statement = [...input.bankLines].sort(byKey((line) => line.idempotencyKey));
+  const credits = statement.filter(isCredit);
+  // Debits are not noise to be filtered out. A returned payout is a debit, and it is the
+  // most alarming thing a statement can say.
+  const debits = statement.filter((line) => line.direction === 'debit');
   const inflows = [...input.inflows].sort(byKey((inflow) => inflow.key));
+  const alreadyBanked = [...(input.confirmedInflows ?? [])].sort(byKey((inflow) => inflow.key));
 
   const spent = new Set<string>();
+  /** Confirmed in *this* run, so a second credit in the same statement is recognisable. */
+  const bankedHere: ConfirmedInflow[] = [];
   const confirmed: Confirmation[] = [];
+  const returned: ReturnedPayout[] = [];
   const deferred: MatchResult[] = [];
   const exceptions: MatchResult[] = [];
+
+  const banked = (): ConfirmedInflow[] => [...alreadyBanked, ...bankedHere];
 
   for (const credit of credits) {
     const available = inflows.filter((inflow) => !spent.has(inflow.key));
@@ -458,11 +529,7 @@ export function confirm(input: ConfirmInput): ConfirmResult {
     // The bank quoted the payout's own reference in the narration. Nothing beats that —
     // and note the matcher does the resolving, against inflows it actually holds, rather
     // than a parser having decided at ingest time which token was a reference.
-    const named = available.filter(
-      (inflow) =>
-        credit.statedReference === inflow.key ||
-        credit.narrationTokens.includes(inflow.key.toUpperCase()),
-    );
+    const named = available.filter((inflow) => identifies(credit, inflow.key));
 
     const candidate =
       named.length === 1
@@ -472,14 +539,41 @@ export function confirm(input: ConfirmInput): ConfirmResult {
           : uniqueByAmount(available, credit, policy);
 
     if (!candidate) {
+      // Before calling it unidentified, ask the more specific question: is this the *same*
+      // money arriving twice? A payout we have already banked, named again or matched
+      // again by amount, is not a mystery — it is cash we may have to send back, and
+      // saying "unidentified" would file the most consequential bank event in the system
+      // under the same heading as a stray ₦42 credit.
+      const duplicate = duplicateOf(credit, banked());
+      if (duplicate) {
+        exceptions.push({
+          ...NO_LINKS,
+          bankCreditKeys: [credit.idempotencyKey],
+          payoutReferences: [duplicate.key],
+          reason: 'DUPLICATE_BANK_CREDIT',
+          confidence: CONFIDENCE.none,
+          considered: [
+            {
+              candidateId: duplicate.confirmedBy,
+              kind: 'bank_credit',
+              difference: subtract(credit.amount, duplicate.credited),
+              rejectedBecause: 'already_claimed',
+            },
+          ],
+        });
+        continue;
+      }
+
       // A credit whose narration identifies nothing and whose amount matches nothing —
       // or matches several things equally well, which is the same problem wearing a
-      // different hat.
+      // different hat. The near-misses travel with it: a human should not have to
+      // rediscover what the matcher already looked at.
       exceptions.push({
         ...NO_LINKS,
         bankCreditKeys: [credit.idempotencyKey],
         reason: 'UNIDENTIFIED_CREDIT',
         confidence: CONFIDENCE.none,
+        considered: nearestInflows(credit, inflows, spent, named, policy),
       });
       continue;
     }
@@ -501,6 +595,14 @@ export function confirm(input: ConfirmInput): ConfirmResult {
           payoutReferences: candidate.derived ? [] : [candidate.key],
           reason: 'AMOUNT_MISMATCH',
           confidence: CONFIDENCE.none,
+          considered: [
+            {
+              candidateId: candidate.key,
+              kind: candidate.derived ? 'settlement_line' : 'payout',
+              difference: shortfall,
+              rejectedBecause: 'amount_differs',
+            },
+          ],
         });
         continue;
       }
@@ -510,6 +612,13 @@ export function confirm(input: ConfirmInput): ConfirmResult {
     }
 
     spent.add(candidate.key);
+    bankedHere.push({
+      key: candidate.key,
+      source: candidate.source,
+      credited: credit.amount,
+      confirmedBy: credit.idempotencyKey,
+      valueDate: credit.valueDate,
+    });
     confirmed.push({
       inflow: candidate,
       credit,
@@ -521,6 +630,36 @@ export function confirm(input: ConfirmInput): ConfirmResult {
         bankCreditKeys: [credit.idempotencyKey],
         reason,
         confidence,
+      },
+    });
+  }
+
+  // ── Debits: money that arrived and then left again ────────────────────────
+  //
+  // Only against payouts we have actually banked. A debit matching nothing is somebody
+  // else's story — an outgoing payment, a standing order, a bank fee — and this system has
+  // no opinion about those.
+  for (const debit of debits) {
+    const takenBack = returnedBy(debit, banked(), returned);
+    if (!takenBack) continue;
+
+    returned.push({
+      inflow: takenBack,
+      debit,
+      result: {
+        ...NO_LINKS,
+        payoutReferences: [takenBack.key],
+        bankCreditKeys: [debit.idempotencyKey],
+        reason: 'RETURNED_PAYOUT',
+        confidence: CONFIDENCE.bankByReference,
+        considered: [
+          {
+            candidateId: takenBack.confirmedBy,
+            kind: 'bank_credit',
+            difference: subtract(debit.amount, takenBack.credited),
+            rejectedBecause: 'already_claimed',
+          },
+        ],
       },
     });
   }
@@ -545,7 +684,150 @@ export function confirm(input: ConfirmInput): ConfirmResult {
     }
   }
 
-  return { asOf: input.asOf, confirmed, deferred, exceptions };
+  return { asOf: input.asOf, confirmed, returned, deferred, exceptions };
+}
+
+/** Does this statement line name that movement — in a structured field, or in its prose? */
+function identifies(line: BankStatementLine, key: string): boolean {
+  return line.statedReference === key || line.narrationTokens.includes(key.toUpperCase());
+}
+
+/**
+ * Is this credit the same money we have already banked?
+ *
+ * Named beats amount, as everywhere else. An unnamed credit for exactly what we already
+ * received from a payout is treated as a duplicate too — the alternative is calling it
+ * unidentified, which is technically true and files the most consequential bank event in
+ * the system beside a stray ₦42 credit. A duplicate is not booked either way; the
+ * difference is entirely in what the human is told.
+ */
+function duplicateOf(
+  credit: BankStatementLine,
+  banked: readonly ConfirmedInflow[],
+): ConfirmedInflow | undefined {
+  const named = banked.filter((inflow) => identifies(credit, inflow.key));
+  if (named.length === 1) return named[0];
+
+  const sameAmount = banked.filter((inflow) => equals(inflow.credited, credit.amount));
+  return sameAmount.length === 1 ? sameAmount[0] : undefined;
+}
+
+/**
+ * The confirmed payout this debit is taking back, or nothing.
+ *
+ * The amounts must agree exactly. A bank returning a payout returns the payout — a partial
+ * return is not a thing that happens, and treating an approximate match as a return would
+ * unwind a settlement on the strength of a coincidence. One debit undoes one confirmation,
+ * so anything already claimed by an earlier debit in the same statement is excluded.
+ */
+function returnedBy(
+  debit: BankStatementLine,
+  banked: readonly ConfirmedInflow[],
+  already: readonly ReturnedPayout[],
+): ConfirmedInflow | undefined {
+  const claimed = new Set(already.map((entry) => entry.inflow.key));
+  const open = banked.filter(
+    (inflow) => !claimed.has(inflow.key) && equals(inflow.credited, debit.amount),
+  );
+  if (open.length === 0) return undefined;
+
+  const named = open.filter((inflow) => identifies(debit, inflow.key));
+  if (named.length === 1) return named[0];
+  // Unnamed: only when exactly one banked payout is for this amount. Two would mean
+  // guessing which settlement to unwind, and unwinding the wrong one is worse than
+  // escalating both.
+  return named.length === 0 && open.length === 1 ? open[0] : undefined;
+}
+
+/**
+ * The inflows this credit came closest to, and why each was not taken.
+ *
+ * The working, kept. "₦12,000 credited, matches nothing" is a mystery somebody has to
+ * reconstruct from scratch; "the nearest was PO-91 at ₦11,950 — ₦50 out — and PO-88 fits
+ * exactly but was already claimed by another credit" is a decision they can make now.
+ *
+ * Ordered by how close, and capped, because a list of every open inflow is not an
+ * explanation — it is a haystack with a note attached.
+ */
+function nearestInflows(
+  credit: BankStatementLine,
+  inflows: readonly ExpectedInflow[],
+  spent: ReadonlySet<string>,
+  named: readonly ExpectedInflow[],
+  policyFor: (source: SourceId) => SourcePolicy,
+): RejectedCandidate[] {
+  const ambiguous = new Set(named.length > 1 ? named.map((inflow) => inflow.key) : []);
+
+  return [...inflows]
+    .map((inflow) => {
+      const difference = subtract(inflow.expectedNet, credit.amount);
+      const magnitude = difference.kobo < 0n ? -difference.kobo : difference.kobo;
+
+      const rejectedBecause: RejectedCandidate['rejectedBecause'] = ambiguous.has(inflow.key)
+        ? 'ambiguous'
+        : spent.has(inflow.key)
+          ? 'already_claimed'
+          : !notBefore(credit, inflow)
+            ? 'outside_window'
+            : 'amount_differs';
+
+      return {
+        candidate: {
+          candidateId: inflow.key,
+          kind: (inflow.derived ? 'settlement_line' : 'payout') as RejectedCandidate['kind'],
+          difference,
+          rejectedBecause,
+        },
+        magnitude,
+        // A candidate whose amount fits and lost for another reason is far more
+        // interesting than one that is merely nearest, so it sorts first.
+        exact: magnitude <= policyFor(inflow.source).bankChargeAllowance ? 0 : 1,
+      };
+    })
+    .sort((a, b) => (a.exact !== b.exact ? a.exact - b.exact : compareBigint(a.magnitude, b.magnitude)))
+    .slice(0, MAX_CANDIDATES)
+    .map((entry) => entry.candidate);
+}
+
+/**
+ * The promises a payout came closest to, and why the search rejected each.
+ *
+ * A payout that matches no combination of promises is the finding most likely to be a data
+ * problem rather than a fraud — a webhook we never received, a payment recorded under a
+ * different reference, a promise that a previous payout already claimed. Which of those it
+ * is shows in the near-misses, so they travel with the exception rather than being
+ * recomputed by whoever picks it up.
+ */
+function nearestPromises(
+  target: Money,
+  candidates: readonly OpenPromise[],
+  valueDate: Date | null,
+  policy: SourcePolicy,
+  owed: (promise: OpenPromise) => Money,
+): RejectedCandidate[] {
+  return [...candidates]
+    .map((promise) => {
+      const difference = subtract(owed(promise), target);
+      const magnitude = difference.kobo < 0n ? -difference.kobo : difference.kobo;
+      return {
+        candidate: {
+          candidateId: promise.transactionId,
+          kind: 'transaction' as const,
+          difference,
+          rejectedBecause: !withinReach(promise, valueDate, policy)
+            ? ('outside_window' as const)
+            : ('amount_differs' as const),
+        },
+        magnitude,
+      };
+    })
+    .sort((a, b) => compareBigint(a.magnitude, b.magnitude))
+    .slice(0, MAX_CANDIDATES)
+    .map((entry) => entry.candidate);
+}
+
+function compareBigint(a: bigint, b: bigint): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /**

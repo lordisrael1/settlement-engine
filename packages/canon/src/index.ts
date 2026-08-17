@@ -19,6 +19,8 @@
  *   fees.ts         what we expected to be charged, per contract, channel and date
  *   evidence.ts     the documents we reasoned from, and the humans who decided
  *   matching.ts     what reconciliation concluded, and why
+ *   exception.ts    a difference nobody has explained yet, and its lifecycle
+ *   events.ts       everything that happened, in order, as one narrative
  */
 
 export * from './money.js';
@@ -34,3 +36,5 @@ export * from './calendar.js';
 export * from './fees.js';
 export * from './evidence.js';
 export * from './matching.js';
+export * from './exception.js';
+export * from './events.js';

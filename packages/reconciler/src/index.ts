@@ -33,6 +33,7 @@
  *   apportion.ts  how one batch deduction is split across the payments it was charged on
  *   subset.ts     the batching engine, and why it refuses to guess
  *   match.ts      the two stages themselves
+ *   exceptions.ts the queue: differences with a lifecycle, and how they clear themselves
  *   store.ts      where the three records, the evidence and the conclusions live
  *   run.ts        loading, matching, booking
  */
@@ -45,12 +46,28 @@ export {
   outstanding,
   type AllocateInput,
   type AllocateResult,
+  type ConfirmedInflow,
   type ConfirmInput,
   type Confirmation,
   type ConfirmResult,
   type OpenPromise,
   type PreparedInflow,
+  type ReturnedPayout,
 } from './match.js';
+
+export {
+  acknowledge,
+  clearVanished,
+  draftFrom,
+  exceptionAt,
+  exceptionHistory,
+  openExceptions,
+  raiseExceptions,
+  resolveByHuman,
+  type ExceptionDraft,
+  type QueueFilter,
+  type RaiseOutcome,
+} from './exceptions.js';
 
 export {
   derivedKey,
@@ -96,6 +113,7 @@ export {
   unallocatedPayouts,
   unallocatedSettlementLines,
   unmatchedBankLines,
+  confirmedInflows,
   saveInflow,
   openInflows,
   confirmInflow,

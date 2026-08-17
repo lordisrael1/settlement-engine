@@ -1,13 +1,19 @@
 import { readFile } from 'node:fs/promises';
 
-import { format } from '@recon/canon';
+import { format, money } from '@recon/canon';
 import {
   ingestBankStatement,
   ingestSettlement,
   SOURCE_IDS,
   sourceProfile,
 } from '@recon/ingest';
-import { createPool, LEDGER_MIGRATIONS_DIR, runMigrations } from '@recon/ledger-core';
+import {
+  createPool,
+  LEDGER_MIGRATIONS_DIR,
+  rebuildBalancesFromEvents,
+  replay,
+  runMigrations,
+} from '@recon/ledger-core';
 import {
   reconcile,
   recordBankLines,
@@ -28,7 +34,14 @@ import { buildPolicy } from './policy.js';
  * becomes wrong.
  */
 const MERCHANT = process.env['RECON_MERCHANT'] ?? 'default-merchant';
-import { heading, line, printBalances, printReconciliation, printVerification } from './report.js';
+import {
+  heading,
+  line,
+  printBalances,
+  printQueue,
+  printReconciliation,
+  printVerification,
+} from './report.js';
 
 /**
  * Each package owns its own migrations and its own number range, so adding one to the
@@ -55,6 +68,8 @@ const COMMANDS = [
   'ingest-settlement',
   'ingest-bank',
   'reconcile',
+  'exceptions',
+  'replay',
 ] as const;
 type Command = (typeof COMMANDS)[number];
 
@@ -205,6 +220,49 @@ async function main(argv: readonly string[]): Promise<number> {
         });
         printReconciliation(run);
         return run.failures.length === 0 ? 0 : 1;
+      }
+
+      case 'replay': {
+        heading('Replaying from event zero');
+        line('  Fold the log, and check what falls out against every projection derived');
+        line('  from it. Three independent records of the same truth — the entries, the');
+        line('  balance cache, and the event log — written by three different code paths.');
+        line();
+
+        // `--rebuild` throws the cache away first, which is the doctrine's exit criterion
+        // done rather than argued. Without it this is a read-only proof, safe to run on a
+        // schedule against production.
+        const rebuild = argv.includes('--rebuild');
+        const report = rebuild ? await rebuildBalancesFromEvents(pool) : await replay(pool);
+
+        line(`  ${report.events} events folded${rebuild ? ', balances rebuilt from them' : ''}.`);
+        for (const [accountId, balance] of [...report.balances].sort()) {
+          line(`    ${accountId.padEnd(18)} ${format(money(balance)).padStart(16)}`);
+        }
+
+        line();
+        if (report.agrees) {
+          line('  [32m✓ every projection agrees with the log.[0m');
+          return 0;
+        }
+
+        line('  [31m✗ a projection disagrees with the log:[0m');
+        for (const drift of report.drift) {
+          line(`    ${drift.what} ${drift.key}: log says ${drift.fromEvents}, live says ${drift.live}`);
+        }
+        return 1;
+      }
+
+      case 'exceptions': {
+        heading('The queue');
+        line('  Worst first: cash we hold and cannot explain outranks money that is late.');
+        line('  Every entry carries what the matcher already considered and rejected.');
+        line();
+        await printQueue(pool);
+        // An exception queue is not a failure. Exit 0 whatever it holds; the *contents*
+        // are the operational signal, and a non-zero exit here would make every cron that
+        // runs it look broken.
+        return 0;
       }
     }
   } finally {

@@ -82,6 +82,7 @@ export async function bookAuthorizedPayment(
     // The rail travels with the promise, because the fee it will attract is priced per
     // channel and reconstructing it later from narration is guesswork.
     channel: payment.channel,
+    event: { type: 'PaymentAuthorized' },
     entries: [
       { accountId: 'psp_receivable', amount: payment.gross },
       { accountId: 'merchant_revenue', amount: negate(payment.gross) },
@@ -206,6 +207,7 @@ export async function bookBankConfirmedSettlement(
       recordedAt: confirmation.recordedAt,
       // The cash has landed. There is no later event this transaction waits for.
       initialState: 'settled',
+      event: { type: 'SettlementBooked', causedBy: confirmation.reference },
       entries: nonZero([
         { accountId: 'bank_account', amount: confirmation.credited },
         ...deductions,
@@ -270,6 +272,7 @@ export async function bookReversal(
       occurredAt: event.at,
       recordedAt: event.at,
       initialState: 'settled',
+      event: { type: 'ReversalBooked', causedBy: promise.transactionId },
       entries: [
         { accountId: 'reversals', amount: promise.amount },
         { accountId: 'psp_receivable', amount: negate(promise.amount) },
@@ -322,6 +325,7 @@ export async function bookChargeback(
     occurredAt: event.at,
     recordedAt: event.at,
     initialState: 'settled',
+    event: { type: 'ChargebackBooked' },
     entries: [
       { accountId: 'chargebacks', amount },
       { accountId: 'bank_account', amount: negate(amount) },
@@ -350,6 +354,7 @@ export async function bookReturnedPayout(
     occurredAt: event.at,
     recordedAt: event.at,
     initialState: 'settled',
+    event: { type: 'PayoutReturned', causedBy: event.reference },
     entries: original.map((entry) => ({
       accountId: entry.accountId,
       amount: negate(entry.amount),
@@ -428,6 +433,7 @@ export async function bookResolutionAdjustment(
     recordedAt: resolution.resolvedAt,
     // Nothing further is expected of a correction; it is complete when it is posted.
     initialState: 'settled',
+    event: { type: 'ResolutionRecorded', causedBy: resolution.subjectId },
     entries: nonZero(entries),
   });
 }

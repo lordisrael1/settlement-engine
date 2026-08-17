@@ -14,5 +14,13 @@
     "type": "debit",
     "narration": "COMMISSION ON TURNOVER Q3",
     "balance": "8332.00"
+  },
+  {
+    "id": "GTB-2026-081503",
+    "date": "2026-08-14T14:05:00Z",
+    "amount": "7450.00",
+    "type": "credit",
+    "narration": "NIP TRF FROM ADEBAYO VENTURES LTD",
+    "balance": "15782.00"
   }
 ]

@@ -1,14 +1,28 @@
-import type { LedgerTransaction, MatchResult, Money, TransactionId } from '@recon/canon';
+import type {
+  ExceptionSubject,
+  LedgerTransaction,
+  MatchResult,
+  Money,
+  TransactionId,
+} from '@recon/canon';
 import type { Executor } from '@recon/ledger-core';
 import {
   bookBankConfirmedSettlement,
   bookChargeback,
+  bookReturnedPayout,
   bookReversal,
   getTransaction,
   inTransaction,
   listByState,
+  transition,
 } from '@recon/ledger-core';
 
+import {
+  clearVanished,
+  draftFrom,
+  raiseExceptions,
+  type ExceptionDraft,
+} from './exceptions.js';
 import {
   allocate,
   confirm,
@@ -16,12 +30,15 @@ import {
   type AllocateResult,
   type ConfirmResult,
   type PreparedInflow,
+  type ReturnedPayout,
 } from './match.js';
 import type { PolicyLookup } from './policy.js';
 import {
   allocatedByTransaction,
   allocationsOf,
+  confirmedInflows,
   confirmInflow,
+  markPayoutReturned,
   openInflows,
   recordMatch,
   saveInflow,
@@ -79,6 +96,13 @@ export interface ReconciliationRun {
   /** Every conclusion, from both stages, for reporting. */
   readonly deferred: readonly MatchResult[];
   readonly exceptions: readonly MatchResult[];
+  /** What this run did to the queue: raised, left alone, reopened, cleared. */
+  readonly queue: {
+    readonly raised: number;
+    readonly unchanged: number;
+    readonly reopened: number;
+    readonly cleared: number;
+  };
 }
 
 export async function reconcile(
@@ -122,6 +146,9 @@ export async function reconcile(
   // ── Stage three ───────────────────────────────────────────────────────────
   const confirmation = confirm({
     inflows: await openInflows(db, limit),
+    // Already banked. Not candidates — the evidence that lets a second credit for the same
+    // payout, and a debit taking one back, be recognised as what they are.
+    confirmedInflows: await confirmedInflows(db, limit),
     bankLines: await unmatchedBankLines(db, limit),
     policyFor: input.policyFor,
     asOf: input.asOf,
@@ -184,6 +211,57 @@ export async function reconcile(
     }
   }
 
+  // ── The bank took it back ─────────────────────────────────────────────────
+  for (const returned of confirmation.returned) {
+    await bookReturn(db, returned, input.asOf, booked, failures);
+  }
+
+  // A returned payout books *and* escalates, which is why it is gathered from both places.
+  // It is the one conclusion that moves money and still needs a human: the cash left, the
+  // books are right again, and somebody has to find out why the bank sent it back.
+  const exceptions = [
+    ...allocation.exceptions,
+    ...confirmation.exceptions,
+    ...confirmation.returned.map((entry) => entry.result),
+  ];
+
+  // ── The queue ─────────────────────────────────────────────────────────────
+  //
+  // Findings become durable, deduplicated items with a lifecycle; items this run no longer
+  // finds are closed. The second half is what stops the queue growing by the number of runs
+  // rather than by the number of problems.
+  const drafts = exceptions
+    .map((result) => draftFrom(result, amountOf(result, allocation, confirmation)))
+    .filter((draft): draft is ExceptionDraft => draft !== null);
+
+  const raised = await raiseExceptions(db, drafts, input.asOf);
+  const cleared = await clearVanished(db, drafts, SUBJECTS_THIS_RUN_JUDGED, input.asOf);
+
+  // A promise past its window and its grace is not merely unmatched — it is a question the
+  // ledger itself should be able to answer. `exception` is deliberately non-terminal: a
+  // settlement file that turns up late still clears it.
+  for (const result of exceptions) {
+    if (result.reason !== 'MISSING_SETTLEMENT') continue;
+    for (const transactionId of result.transactionIds) {
+      try {
+        await transition(db, {
+          transactionId,
+          to: 'exception',
+          at: input.asOf,
+          causedBy: null,
+        });
+      } catch (error) {
+        // A promise that reached a terminal state between the match and this write is not a
+        // failure of the run — it is the answer arriving while we were asking the question.
+        failures.push({
+          matchId: `escalate:${transactionId}`,
+          reason: result.reason,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
   return {
     asOf: input.asOf,
     allocation,
@@ -191,8 +269,113 @@ export async function reconcile(
     booked,
     failures,
     deferred: [...allocation.deferred, ...confirmation.deferred],
-    exceptions: [...allocation.exceptions, ...confirmation.exceptions],
+    exceptions,
+    queue: { ...raised, cleared },
   };
+}
+
+/**
+ * Which kinds of subject this run was in a position to judge.
+ *
+ * Every run reads all three records, so every run can speak to all four subjects — and
+ * anything it does not find again really has gone away. A future partial run (one source
+ * only, say) must narrow this, because treating silence as "resolved" would close problems
+ * that are still entirely real.
+ */
+const SUBJECTS_THIS_RUN_JUDGED: readonly ExceptionSubject[] = [
+  'payout',
+  'bank_credit',
+  'transaction',
+  'settlement_line',
+];
+
+/**
+ * What the difference is worth, dug out of whichever stage produced it.
+ *
+ * A queue entry without an amount is a queue entry nobody can triage — "PO-91 is
+ * unexplained" and "PO-91 is unexplained, ₦4.2m" are different mornings.
+ */
+function amountOf(
+  result: MatchResult,
+  allocation: AllocateResult,
+  confirmation: ConfirmResult,
+): Money | null {
+  const returned = confirmation.returned.find((entry) =>
+    result.bankCreditKeys.includes(entry.debit.idempotencyKey),
+  );
+  if (returned) return returned.debit.amount;
+
+  const prepared = allocation.prepared.find((entry) =>
+    result.payoutReferences.includes(entry.inflow.key),
+  );
+  return prepared?.inflow.expectedNet ?? null;
+}
+
+/**
+ * Cash that arrived and then left again.
+ *
+ * Booked as an exact negation of the transaction that confirmed it, written as its own
+ * event rather than by unwinding the original (Law 2). Every account it touched moves back,
+ * which means the receivable reopens: the PSP still owes us, and the payments the payout
+ * covered go back to waiting.
+ */
+async function bookReturn(
+  db: Executor,
+  returned: ReturnedPayout,
+  asOf: Date,
+  booked: Booked[],
+  failures: BookingFailure[],
+): Promise<void> {
+  const matchId = `return:${returned.debit.idempotencyKey}`;
+
+  try {
+    const original = await getTransaction(db, returned.inflow.confirmedBy);
+    if (!original) {
+      failures.push({
+        matchId,
+        reason: returned.result.reason,
+        error: `no confirming transaction "${returned.inflow.confirmedBy}" to reverse`,
+      });
+      return;
+    }
+
+    const outcome = await inTransaction(db, async (client) => {
+      const posted = await bookReturnedPayout(
+        client,
+        {
+          key: returned.debit.idempotencyKey,
+          source: returned.inflow.source,
+          reference: returned.inflow.key,
+          at: returned.debit.valueDate,
+        },
+        original.entries.map((entry) => ({
+          accountId: entry.accountId,
+          amount: entry.amount,
+        })),
+      );
+
+      if (posted.outcome === 'posted') {
+        // Recorded on the payout rather than by clearing the confirmation: the money
+        // genuinely did arrive and genuinely did leave, and both halves belong in history.
+        await markPayoutReturned(client, returned.inflow.key);
+        await recordMatch(client, matchId, returned.result, posted.transactionId, asOf);
+      }
+      return posted.outcome;
+    });
+
+    booked.push({
+      matchId,
+      reason: returned.result.reason,
+      transactionId: returned.debit.idempotencyKey,
+      outcome,
+    });
+  } catch (error) {
+    failures.push({
+      matchId,
+      reason: returned.result.reason,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /**

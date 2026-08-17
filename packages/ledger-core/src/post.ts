@@ -1,5 +1,6 @@
 import type {
   AccountId,
+  DomainEventType,
   Money,
   PaymentChannel,
   Reference,
@@ -10,6 +11,7 @@ import type {
 import { sum, sumsToZero } from '@recon/canon';
 
 import { UnbalancedTransactionError } from './errors.js';
+import { appendEvent } from './events.js';
 import { inTransaction, type Executor } from './pool.js';
 
 export interface EntryInput {
@@ -35,6 +37,18 @@ export interface PostTransactionInput {
    * expected to attract is priced per channel.
    */
   readonly channel?: PaymentChannel | null;
+  /**
+   * What kind of happening this transaction records, for the event log.
+   *
+   * Named by the caller because only the caller knows: the entries for an authorized
+   * payment and a reversal are both "two rows against `psp_receivable`", and which one it
+   * *is* is domain knowledge that lives in `bookings.ts`, not here.
+   *
+   * Optional so that a test or a migration can post without narrating. A transaction with
+   * no event is invisible to `replay`, which is why every real booking supplies one and the
+   * replay's entry-level check catches any that stops doing so.
+   */
+  readonly event?: { readonly type: DomainEventType; readonly causedBy?: string | null };
 }
 
 export interface PostTransactionResult {
@@ -123,6 +137,22 @@ export async function postTransaction(
                 SET balance_kobo = account_balances.balance_kobo + EXCLUDED.balance_kobo`,
         [accountId, amount.kobo.toString(), amount.currency],
       );
+    }
+
+    // The narrative and the entries, in one transaction. Not after, not by a listener: an
+    // event log written asynchronously is a log that is usually right, and "usually right"
+    // is not a property an audit can rest on.
+    if (input.event) {
+      await appendEvent(client, {
+        type: input.event.type,
+        subject: input.transactionId,
+        source: input.source,
+        occurredAt: input.occurredAt,
+        recordedAt: input.recordedAt,
+        entries: input.entries,
+        detail: { reference: input.reference, state: input.initialState },
+        causedBy: input.event.causedBy ?? null,
+      });
     }
 
     return { outcome: 'posted', transactionId: input.transactionId };

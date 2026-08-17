@@ -420,6 +420,12 @@ test('a credit short by more than a bank charge is a discrepancy, not a charge',
  * Two credits, one payout. The second is money we may have to send back, and it must not
  * quietly confirm anything — the partial unique index in the schema says the same thing a
  * second time, in the database.
+ *
+ * It is reported as `DUPLICATE_BANK_CREDIT` rather than `UNIDENTIFIED_CREDIT`. Both are
+ * refusals to book, so no money moves either way; the difference is entirely in what the
+ * human is told. "We appear to have been paid this twice, here is the first credit" is a
+ * morning's work; "money we cannot identify" files the most consequential bank event in the
+ * system beside a stray ₦42 credit.
  */
 test('a duplicated bank credit cannot confirm the same payout twice', () => {
   const inflows = inflowOf(
@@ -440,8 +446,17 @@ test('a duplicated bank credit cannot confirm the same payout twice', () => {
   assert.equal(result.confirmed.length, 1);
   assert.deepEqual(
     result.exceptions.map((f) => [f.reason, f.bankCreditKeys[0]]),
-    [['UNIDENTIFIED_CREDIT', 'bank-2']],
+    [['DUPLICATE_BANK_CREDIT', 'bank-2']],
   );
+  // And it points at the credit it duplicates, so the reader does not have to go looking.
+  assert.deepEqual(result.exceptions[0]!.considered, [
+    {
+      candidateId: 'bank-1',
+      kind: 'bank_credit',
+      difference: money(0n),
+      rejectedBecause: 'already_claimed',
+    },
+  ]);
 });
 
 /**

@@ -29,8 +29,26 @@ const DATABASE_URL = process.env['DATABASE_URL'];
 describe('the ledger', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run' }, () => {
   let pool: Pool;
 
+  /**
+   * A schema of this suite's own.
+   *
+   * It posts a thousand random transactions, deliberately without narrating them to the
+   * event log — they are synthetic fixtures, not happenings, and inventing an event type for
+   * them would put fiction in the one table that proves everything else. But that makes them
+   * exactly the drift `replay` exists to detect, so they must not land in the schema the
+   * demo and the CLI use, or every replay of a dev database would report a fault that is
+   * really just this file having run.
+   */
   before(async () => {
-    pool = createPool(DATABASE_URL);
+    const schema = `ledger_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    const bootstrap = createPool(DATABASE_URL);
+    await bootstrap.query(`CREATE SCHEMA ${schema}`);
+    await bootstrap.end();
+
+    const url = new URL(DATABASE_URL!);
+    url.searchParams.set('options', `-c search_path=${schema}`);
+    pool = createPool(url.toString());
+
     await runMigrations(pool);
   });
 

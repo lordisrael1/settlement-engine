@@ -1,7 +1,7 @@
 import type { AccountId, MatchResult, Money } from '@recon/canon';
 import { CHART_OF_ACCOUNTS, format, isZero, reasonKind } from '@recon/canon';
 import { allBalances, verifyBalances, verifyConservation, type Executor } from '@recon/ledger-core';
-import type { ReconciliationRun } from '@recon/reconciler';
+import { openExceptions, type ReconciliationRun } from '@recon/reconciler';
 
 export function heading(text: string): void {
   console.log(`\n\x1b[1m${text}\x1b[0m`);
@@ -67,10 +67,54 @@ export function printReconciliation(run: ReconciliationRun): void {
   console.log();
   section('unexplained', 'a human sees this', run.exceptions);
 
+  // What the run did to the *queue*, which is a different number from what it found. A run
+  // that finds four problems and raises none has found the same four as yesterday, and
+  // saying so is the difference between a queue and a report.
+  console.log();
+  console.log(
+    `  queue                              ` +
+      `${String(run.queue.raised).padStart(3)} raised, ` +
+      `${run.queue.unchanged} already open, ` +
+      `${run.queue.reopened} returned, ` +
+      `${run.queue.cleared} cleared by evidence`,
+  );
+
   for (const failure of run.failures) {
     console.log(`\n  ✗ ${failure.matchId} (${failure.reason})`);
     console.log(`    ${failure.error.split('\n')[0]}`);
   }
+}
+
+/**
+ * The queue a human actually works from.
+ *
+ * Worst first, and every entry carries what the matcher already looked at — because the
+ * alternative is an operator re-deriving, by hand, the reasoning the machine threw away.
+ */
+export async function printQueue(db: Executor, limit = 50): Promise<number> {
+  const items = await openExceptions(db, { limit });
+
+  if (items.length === 0) {
+    console.log('  Nothing unexplained. This is the goal, not a bug.');
+    return 0;
+  }
+
+  for (const item of items) {
+    const age = item.state === 'acknowledged' ? `held by ${item.acknowledgedBy}` : 'unowned';
+    console.log(
+      `  ${item.reason.padEnd(22)} ${item.subject.padEnd(15)} ${item.subjectId.slice(-24).padEnd(26)}` +
+        `${item.amount ? format(item.amount).padStart(14) : ''.padStart(14)}   ${age}`,
+    );
+    for (const candidate of item.considered) {
+      console.log(
+        `      considered ${candidate.candidateId.slice(-24).padEnd(26)}` +
+          `${candidate.difference ? format(candidate.difference).padStart(14) : ''.padStart(14)}` +
+          `   ${candidate.rejectedBecause.replace(/_/g, ' ')}`,
+      );
+    }
+  }
+
+  return items.length;
 }
 
 /**

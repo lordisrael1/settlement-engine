@@ -39,6 +39,7 @@ import {
   heading,
   line,
   printBalances,
+  printQueue,
   printReconciliation,
   printVerification,
 } from './report.js';
@@ -442,7 +443,34 @@ export async function runDemo(pool: Pool): Promise<boolean> {
   line('  Cash moves on bank evidence, and a human’s conclusion is not bank evidence.');
   line('  The moment that is allowed "once, carefully", the three-way model is decoration.');
 
-  heading('17 · The system checks itself');
+  // ── The queue ─────────────────────────────────────────────────────────────
+  heading('17 · The queue — and the straggler that clears itself');
+
+  line('  Every run so far reported the same findings from scratch. They are now durable');
+  line('  items with a life: raised once, deduplicated across runs, and closed when the');
+  line('  evidence turns up. What a run does to the queue is a different number from what');
+  line('  it found — and the second number is the one that tells you whether anything has');
+  line('  actually changed since yesterday.');
+  line();
+  const queued = await printQueue(pool, 20);
+
+  line();
+  line('  Nothing here was raised twice. Running the matcher again finds the same problems');
+  line('  and appends nothing:');
+  const rerunQueue = await reconcile(pool, { asOf: now, policyFor });
+  line(
+    `    ${rerunQueue.queue.raised} raised, ${rerunQueue.queue.unchanged} already open, ` +
+      `${rerunQueue.queue.cleared} cleared`,
+  );
+  const queueIsStable = rerunQueue.queue.raised === 0;
+  if (!queueIsStable) line('  ✗ the queue grew by the number of runs rather than of problems');
+
+  line();
+  line('  The unconfirmed payout is not in the queue at all: it is inside its settlement');
+  line('  window, so it is pending rather than late. A calendar is what separates the two,');
+  line('  and getting it wrong is how an exception queue becomes something nobody opens.');
+
+  heading('18 · The system checks itself');
   const verified = await printVerification(pool);
 
   line();
@@ -454,6 +482,8 @@ export async function runDemo(pool: Pool): Promise<boolean> {
     reclassified.bookedTransactionId !== null &&
     selfApproved !== null &&
     bankTouched !== null &&
+    queueIsStable &&
+    queued >= 0 &&
     stageTwo.failures.length === 0 &&
     stageThree.failures.length === 0
   );

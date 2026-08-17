@@ -48,6 +48,16 @@ export {
 export { getTransaction, listByState, listByReference } from './read.js';
 
 export {
+  appendEvent,
+  countEvents,
+  eventsAbout,
+  readEvents,
+  type EventInput,
+  type StoredEvent,
+} from './events.js';
+export { replay, rebuildBalancesFromEvents } from './replay.js';
+
+export {
   balance,
   allBalances,
   cachedBalance,
