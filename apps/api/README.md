@@ -1,44 +1,80 @@
-# apps/api — Phase 6 (not yet built)
+# apps/api — the service
 
-**The long-lived service.** A Fastify process that binds a port, accepts HTTP, receives
-webhooks, and wires the libraries together.
+**The long-lived process.** A Fastify service that binds a port, receives webhooks, accepts
+the two evidence files, exposes the books and the queue, and drains the inbox in the
+background.
 
-> A deployable already exists: [`apps/pipeline`](../pipeline), a CLI over the same
-> libraries, built because containerisation was brought forward and a container needs a
-> program to run. This service **joins** it rather than replacing it — one set of
-> libraries, two ways to run them. The Dockerfile changes by one line, and nothing under
-> `packages/` changes at all. See [DECISIONS.md § D-022](../../docs/DECISIONS.md).
+It **joins** [`apps/pipeline`](../pipeline) rather than replacing it — one set of libraries,
+two ways to run them. Nothing under `packages/` changed when it arrived, which is what the
+library/deployable split was for ([D-022](../../docs/DECISIONS.md)).
 
-**Depends on:** all four packages. **Depended on by:** nothing. That shape — depends on
-everything, depended on by nothing — is the signature of a deployable, and it is exactly why
-the app, and only the app, is what gets containerised (Phase 7).
+## Three rails, and only one of them books cash
 
-## The division of concerns it must respect
+```
+POST /webhooks/:source            verify the signature over the raw bytes
+                                  → one row in webhook_inbox → 200, in milliseconds
+   (the worker, moments later)    → ingest normalises → ledger-core books the promise
 
-The API owns *"it arrived over HTTP and is authentic."*
-Ingest owns *"turn this shape into a canonical event."*
-Neither reaches into the other's concern.
+POST /ingest/settlement/:source   the PSP's claim   → evidence + payouts. BOOKS NOTHING.
+POST /ingest/bank                 our bank's proof  → evidence + statement lines.
 
-So an inbound webhook: the API verifies the signature and well-formedness (transport), then
-hands the raw payload to `@recon/ingest` (meaning), and the resulting canonical event goes
-to `@recon/ledger-core`. A settlement upload: the API receives the file, ingest normalises
-it, the reconciler matches it.
+POST /reconcile/runs              stage two, then stage three — the only path to cash.
+```
 
-**The API is the conductor; the packages are the orchestra.** If you find a Law being
-enforced in this directory, it is in the wrong place.
+The webhook rail is asynchronous because a remote system is on a retry timer and the only
+promise worth making it is *"we safely received this event"*. The upload rails are
+synchronous because nobody is on a timer, and the operator would rather have the counts than
+a receipt. Two different questions, two different answers ([D-050](../../docs/DECISIONS.md),
+[D-051](../../docs/DECISIONS.md)).
 
 ## The contract
 
-Deliberate and minimal:
+| | | |
+|---|---|---|
+| `GET` | `/health` | database reachability and how far behind the inbox is. No auth — a health check that needs a credential is one the load balancer cannot make. |
+| `POST` | `/webhooks/:source` | 200 accepted · 401 bad signature · 404 unknown source · 503 no secret configured |
+| `GET` | `/deliveries/:deliveryId` | what became of an accepted webhook, down to the ledger transaction id |
+| `GET` | `/balances` | every account, its meaning, and its balance in kobo |
+| `POST` | `/ingest/settlement/:source` | the file as raw bytes · 501 for a source with no adapter |
+| `POST` | `/ingest/bank` | the file as raw bytes |
+| `POST` | `/reconcile/runs` | what it concluded, what it booked, what it could not explain |
+| `GET` | `/reconciliation/summary?from&to` | matched / explained / exceptions, plus money reported and not yet banked |
+| `GET` | `/exceptions` · `/exceptions/:key` | the queue, worst first, with the candidates the matcher rejected |
+| `POST` | `/exceptions/:key/resolve` | through maker-checker: an unapproved write-off is a 422 |
 
-- query balances
-- upload / ingest a settlement source
-- fetch a reconciliation summary per period
-- list and resolve exceptions
-- receive inbound webhooks
+Two rails of authenticity, deliberately. Management endpoints need `X-API-Key`; webhooks
+authenticate by the provider's signature and nothing else, because a PSP holds no credential
+of ours ([D-052](../../docs/DECISIONS.md)).
 
-**Exit criterion.** Every capability reachable via `curl` with correct status codes and
-auth; a real or simulated webhook flowing end to end into an `authorized` transaction; and
-no business logic in this layer.
+## Run it
 
-See [the bible, Phase 6](../../docs/RECONCILIATION-BIBLE.md#phase-6--the-api-and-the-service).
+```bash
+docker compose up --build
+
+curl localhost:8080/health
+curl -H 'x-api-key: local-dev-key-0123456789' localhost:8080/balances
+curl -X POST -H 'x-api-key: local-dev-key-0123456789' localhost:8080/reconcile/runs
+curl -X POST -H 'x-api-key: local-dev-key-0123456789' \
+     --data-binary @settlements.json localhost:8080/ingest/settlement/flutterwave
+```
+
+## What is deliberately not here
+
+No business logic. Every handler is three lines — parse the request, call one package
+function, serialise the answer — and the two things that nearly leaked in went back where
+they belonged: the period summary into the reconciler, because the reason-code taxonomy
+lives in `canon` and a second copy in a route's SQL could disagree with it; and the
+resolution flow, because closing a queue item, recording a decision and posting its
+compensating entry is one database transaction, not three HTTP-handler statements
+([D-054](../../docs/DECISIONS.md)).
+
+What this layer *does* own is real: raw bytes preserved for signature verification, `bigint`
+crossing as a decimal string and never as a JSON number, and each domain refusal mapped to
+the status code it deserves, carrying the engine's own message rather than a generic one.
+
+If you find a Law being enforced in this directory, it is in the wrong place.
+
+**Exit criterion, met.** Every capability is reachable by `curl` with correct status codes
+and auth; a signed webhook flows end to end into an `authorized` transaction; no business
+logic lives in this layer. `apps/api/src/api.test.ts` asserts all three through
+`app.inject()`, against a real Postgres.

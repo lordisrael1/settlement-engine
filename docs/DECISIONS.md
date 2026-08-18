@@ -65,12 +65,14 @@ that proves nothing.
 **Decision.** A payment is recorded as two ledger transactions, not one:
 
 ```
-T+0  authorized      psp_receivable   +gross     merchant_revenue  -gross
-T+1  settled         bank_account     +net       fees_expense      +fee     psp_receivable  -gross
+T+0        authorized   psp_receivable  +gross      merchant_revenue  -gross
+T+1/T+2    settled      bank_account    +credited   psp_receivable    -Σ discharged
+           on bank      fees_expense    +fee        taxes_withheld    +tax
+           evidence     psp_reserve     +reserve    penalties         +penalty
 ```
 
-Revenue is booked at **gross** — what the customer actually paid. The fee is a **debit** to
-`fees_expense`, booked only when the settlement file reveals the real fee.
+Revenue is booked at **gross** — what the customer actually paid. The deductions are
+**debits**, booked only when the money actually arrives and the amounts are known.
 
 **Why.** Three reasons, in order of weight.
 
@@ -90,6 +92,24 @@ That sums to zero, so it satisfies Law 1, but it credits an expense account and 
 revenue to net. It also conflates two events that happen at different times — and the gap
 between those times is the entire reason this system exists. The bible's Phase 3 text
 already describes the two-transaction model; the Part I sketch is the outlier.
+
+**Amended 2026-08-16, by D-027 and D-031.** The count is unchanged and so is every reason
+above: a payment is still **two ledger transactions**, revenue is still booked at gross, and
+the deductions are still booked only when they are known. Two things in the sketch had
+drifted from the code and are corrected there.
+
+*What triggers the second transaction.* It is not the settlement file. Under the three-way
+model a PSP's report books nothing at all — it produces an `expected_inflow` and its
+allocations, which are reconciliation state, not ledger state. Only an independent bank
+credit moves `bank_account`. So there are **three records and two transactions**, and the
+gap between the second record and the second transaction is where a payout that was reported
+and never sent now lives.
+
+*What the second transaction contains.* Not `+net` and a single fee. It books `+credited` —
+what the bank actually paid, which may differ from what the PSP promised — against every
+*named* deduction: fee, tax, reserve, penalty, and a bank charge where one was levied. A
+reserve is an asset, not an expense. If the named deductions and the credit do not account
+for the receivable exactly, the booking is refused rather than plugged.
 
 Documented in [FIRST-PRINCIPLES.md § A payment, end to end](FIRST-PRINCIPLES.md#a-payment-end-to-end).
 
@@ -1061,3 +1081,307 @@ that only works on databases with no history.
 **Cost accepted.** The first event is not derived from anything the log itself contains, so
 the period before adoption is attested rather than reconstructed. That is unavoidable and is
 stated in the event's own `detail` rather than left for somebody to infer.
+
+---
+
+# Phase 6 — the service, and the rails that reach it
+
+## D-049 · 2026-08-18 · The product database is not a fourth record
+
+**Decision.** Three rails enter this system and the company's own user/order database is
+none of them. A webhook is the PSP's assertion that a customer paid; a settlement report is
+the PSP's assertion that a payout is coming; a bank statement is our own bank's assertion
+that cash arrived. The product database contributes exactly one thing — the stable mapping
+between an internal payment id, the PSP's reference and the merchant — and it travels as
+`reference` and `merchantId` on records we already hold. No customer, order, email, phone or
+subscription row is copied here.
+
+**Why.** Two reasons, and the first is about correctness rather than privacy.
+
+A reconciliation is an argument between records produced by *different* parties about the
+same money. The product database did not touch the money: it recorded an intention before
+the payment and knows nothing about what settled. Admitting it as a fourth record would add
+a fourth opinion held by the one participant with no independent knowledge — and every
+disagreement it produced would be a disagreement about our own bookkeeping, dressed as a
+reconciliation finding. The reference is enough to answer "which order was this?", which is
+the only question the product side can actually answer.
+
+The second is that a system whose whole job is proving money movement should hold as little
+else as possible. `evidence.raw` already stores whole settlement exports and bank statements;
+adding a PII mirror beside it multiplies the consequences of one leak and the scope of every
+retention question, in exchange for a join the application can already do on a reference.
+
+**Consequence, stated plainly.** "Customer A bought Service X" is a question for the product
+database, answered by joining on the reference this system stores. "Did we get paid, when,
+how much, less what, and can you prove it" is this system's question, and it is answerable
+here without a single customer record.
+
+---
+
+## D-050 · 2026-08-18 · A webhook is accepted durably, and understood afterwards
+
+**Decision.** `POST /webhooks/:source` verifies the signature over the raw bytes, writes one
+row to `webhook_inbox`, and answers 200. A worker — `drain` in the new `@recon/inbox`
+package — claims deliveries with `FOR UPDATE SKIP LOCKED`, one database transaction per
+delivery, normalises them through `@recon/ingest` and posts through `@recon/ledger-core`. The
+delivery id is the SHA-256 of the source and the bytes.
+
+**Why.** The promise being made to a provider is *"we safely received this event"*, and it is
+a different promise from *"we completed every downstream financial operation before
+replying"*. Only the first can be kept in a couple of milliseconds, and only the first stays
+true when the matcher is busy, a balance row is locked, or a settlement file is being parsed.
+Conflating them means any of those makes a provider believe a payment was never delivered —
+so it redelivers, and a queue that was merely slow becomes a queue that is growing.
+
+At a thousand deliveries a second the arithmetic stops being an opinion: 86 million events a
+day, and the response path must be one insert or it is not a response path. But the argument
+does not depend on the volume. At ten deliveries a minute, a webhook handler that books,
+matches and notifies before replying still loses a payment every time the ledger is briefly
+unreachable, and loses it silently, because the provider's retries eventually stop.
+
+**Why content-addressed.** The idempotency key of the *event* is inside the payload, and
+reading it means parsing bytes a stranger chose, before we have decided the delivery is worth
+parsing. The hash of the bytes needs no parser, is computable by anyone holding the same
+delivery, and makes a redelivery collide on the primary key. The event's own key still does
+its work one layer down: the ledger transaction id *is* that key (D-014), so a provider that
+resends the same event with different bytes produces two inbox rows and one transaction. Two
+independent refusals, neither of which anybody has to remember.
+
+**Why a throw means retry.** `ignored` and `rejected` are terminal — a provider event we have
+no use for, or a payload our parser cannot read — because retrying either produces the same
+answer every hour for three days. A handler that *throws* is saying something else: not "this
+delivery is wrong" but "I could not do my job just now". That is the only retryable case,
+capped at `maxAttempts`, after which the delivery is `failed` and a person looks. A poison
+payload retried forever is an infinite loop with a log file.
+
+**Cost accepted.** One table that is deliberately mutable, in a system whose discipline is
+append-only. `state`, `attempts` and `last_error` are updated as a delivery is worked, so
+`webhook_inbox` carries no append-only trigger — the same exemption `account_balances` has,
+for the same reason: a queue that cannot be updated is not a queue. The evidence half of the
+row is never written after the insert, and the financial record stays append-only where it
+belongs, in `entries`.
+
+**Also accepted.** A payment is now visible in the books a fraction of a second after the
+webhook rather than during it. That window is bounded by the drain interval, is visible in
+`/health` as the pending depth, and is the price of the delivery never being lost.
+
+---
+
+## D-051 · 2026-08-18 · The upload rails parse inside the request, and that is a different decision
+
+**Decision.** `POST /ingest/settlement/:source` and `POST /ingest/bank` take the file as raw
+bytes, parse it, and store the evidence and the normalised rows before answering. They do not
+enqueue, and they do not reconcile — matching is `POST /reconcile/runs`.
+
+**Why not the inbox treatment.** The webhook rail is asynchronous because of *who is
+waiting*: a remote system on a retry timer that will resend if we are slow. Nobody is on that
+timer here. Whoever posts the file — an operator today, a scheduled fetcher when one is
+written — can wait for the work the upload actually implies, and making them wait produces
+something
+better in return: the response says how many payouts and lines were stored, how many were
+duplicates, and which rows were refused and why. An accepted-and-queued upload answers with a
+receipt and moves the same information into a log nobody reads.
+
+**Why the parse is safe to run in a request.** It is row-isolated: a bad row is rejected and
+reported, not thrown, so a five-thousand-row export with three broken lines stores 4,997. And
+the evidence id is the SHA-256 of the bytes, so re-uploading after any failure is free and
+idempotent by construction. The bound is a body limit, not a promise about parser speed.
+
+**When this changes, and why the contract does not.** Statements run to hundreds of
+megabytes; past that the parse belongs behind a worker reading the stored bytes. The response
+already carries only the evidence id and counts, so moving the work does not change what a
+client sees — it changes when the counts are final. That is a deployment decision the evidence
+table already supports, not a redesign.
+
+**On the ordering that does matter.** Uploading is not reconciling. A statement landing at
+04:00 and three PSP reports arriving through the morning are reconciled once, at 09:00,
+against each other — not three times, each against whatever had turned up so far. Keeping the
+rails separate from the matcher is what makes that possible.
+
+---
+
+## D-052 · 2026-08-18 · Two rails of authenticity: a signature for the PSP, a key for the operator
+
+**Decision.** Webhook endpoints authenticate by the provider's signature over the raw bytes
+and by nothing else. Every management endpoint requires a static `X-API-Key`, compared in
+constant time. The service refuses to start without one.
+
+**Why the asymmetry.** A PSP holds no credential of ours and never will — asking one to
+present an API key means either handing our management credential to four external companies
+or maintaining four more secrets to no benefit. What it does hold is a shared signing secret,
+and a signature over the exact bytes proves both origin and integrity, which is strictly more
+than a bearer token proves. Conversely, an operator's request has no payload anybody signed,
+so a key is what there is.
+
+**Why the raw bytes are load-bearing.** A signature is computed over bytes. `JSON.parse`
+followed by re-serialising produces different ones — reordered keys, different whitespace,
+different unicode escaping — so a JSON body parser anywhere upstream of the verification
+rejects perfectly valid payloads and, worse, does so intermittently. Fastify scopes content
+type parsers to the plugin that declares them, so the webhook and upload plugins replace the
+parser with one that keeps the `Buffer` while the management routes go on receiving parsed
+JSON.
+
+**Why the process refuses to start without a key.** A service that quietly serves balances,
+accepts statement uploads and books resolutions because an environment variable was missing
+is a worse failure than one that does not come up, and it is the failure nobody notices.
+
+**Cost accepted.** One static key cannot tell two operators apart, so evidence records the
+uploader as a *claim* (`X-Recon-Operator`) rather than as a verified identity, and says so.
+Real identities are one hook and one column away; pretending we have them today would put a
+name on an audit record that nothing checked.
+
+---
+
+## D-053 · 2026-08-18 · What a thousand deliveries a second actually requires, and which half of it is built
+
+**Decision.** The parts of high-volume operation that are *architecture* are built now; the
+parts that are *capacity* are named here and deliberately deferred until there is traffic to
+measure.
+
+**Built, because they are structural and cannot be retrofitted honestly.** Durable acceptance
+separated from interpretation (D-050). Idempotency at every entry point, keyed by content or
+by the event's own id, so retries and redeliveries are free. Claim-and-work with `SKIP
+LOCKED`, so adding a worker is starting a process and requires no coordination, partitioning
+or leader election. Stateless request handling — every route reads its state from Postgres, so
+the service scales by replica count. A bounded reconciliation run, because subset-sum batching
+over an unbounded set of open promises is how a matcher stops returning.
+
+**Named and deferred, because they are tuning against a workload nobody has measured.**
+Time-based partitioning of `entries`, `events` and `webhook_inbox`. Indexes shaped to the
+queries a real dashboard turns out to run. Connection-pool sizing and a pooler in front of
+Postgres. Load tests with realistic duplicate, delayed and out-of-order traffic — which is
+Phase 8's subject and belongs there.
+
+**The one warning worth writing down.** `account_balances` holds one row per account, and
+every posting updates it. At high write rates that row is a lock hotspot: `bank_account` would
+serialise every settlement booking in the system. The escape route is already built rather
+than merely available — the balance table is a **projection**, Law 6 checks it against the
+entries, and `rebuildBalancesFromEvents` discards and rebuilds it from the log (D-047). So the
+fix, when it is needed, is to stop updating it synchronously and rebuild it on a schedule, and
+nothing about the ledger changes: the append-only entries remain the financial truth and the
+cache remains a convenience that can be thrown away.
+
+**Why deferring is not a stopgap.** The AGENTS rule forbids a design meant to be replaced, not
+a design with headroom. Every deferred item above is a change to *one* thing — a table's
+storage, an index, a pool size, when a projection is refreshed — and none of them touches a
+Law, a canonical type, or an interface between packages. Building them now would mean tuning
+against imagined traffic, which is how systems acquire complexity that survives long after the
+guess is disproved.
+
+---
+
+## D-054 · 2026-08-18 · Two things nearly leaked into the API, and where they went instead
+
+**Decision.** `summarize()` lives in `@recon/reconciler`, not in a route. `resolveException()`
+— the decision, its compensating entry, and the closing of the queue item, in one database
+transaction — lives there too. The API layer keeps only the mapping from HTTP to those calls,
+the serialisation of the answers, and the mapping from a domain refusal to a status code.
+
+**Why the summary.** A period summary is "matched / explained / exceptions", and which bucket
+a reason code falls into is `reasonKind` in `canon` (D-036). Writing that grouping as a `CASE`
+in a route's SQL would create a second copy of the taxonomy that could disagree with the first
+— and the copy in the route is the one nobody would think to update.
+
+**Why resolving is one call.** Resolving is genuinely three writes. Sequencing them in an HTTP
+handler would put the atomicity of a financial correction in the transport layer, where a
+thrown error between the second and the third leaves an entry posted whose justification never
+saved, or a queue item closed pointing at a resolution that does not exist. Both look,
+afterwards, exactly like money moved for no reason.
+
+**What the API does own, and it is not nothing.** That `bigint` crosses as a decimal string
+and never as a JSON number (Law 3 at the boundary — a JSON number is a double). That
+`UnknownSourceError` is 404, `NoSettlementAdapterError` is 501, and every "the engine refused
+this on the merits" is 422 carrying the engine's own message, because "422 Unprocessable
+Entity" teaches an operator nothing and "this booking would need a ₦4,200 plug to balance"
+teaches them the rule. That an unmapped error is a 500 and a log line rather than a stack
+trace on the wire.
+
+**The test that this held.** Every handler is three lines — parse, call one package function,
+serialise. If a status code here ever needs a condition on an account or a source, a Law has
+begun leaking upward.
+
+---
+
+## D-055 · 2026-08-18 · The policy join is a package, because two deployables now need it
+
+**Decision.** `buildPolicy` moved from `apps/pipeline/src/policy.ts` to a new `@recon/policy`
+package, imported by both deployables. It is the only package that imports both `ingest` and
+`reconciler`.
+
+**Why it exists at all.** The matcher needs a business calendar and a fee model per source.
+The calendar is declared by ingest beside the adapter that knows the rail; the contracts are
+administered data in the database. The reconciler may import neither — the moment it can reach
+a source table it can branch on a source name (Law 7), and that missing edge is load-bearing.
+So something has to join them, and the joiner is allowed to import both precisely because it
+decides nothing: it fetches, it joins, it hands over a lookup.
+
+**Why it stopped being a file in an app.** It was correct as one while the CLI was the only
+deployable. Two copies of the join that decides how long to wait before calling money late is
+two copies that can disagree — the API and the CLI reconciling the same database to different
+answers, which is a Law 5 failure with no single line of code that is wrong.
+
+**Cost accepted.** A package for one function, and a package whose dependency shape — imports
+everything, imported only by apps — is otherwise the signature of an app. That shape is stated
+in its README so the next reader does not mistake it for a mistake.
+
+---
+
+## D-056 · 2026-08-18 · The service migrates on boot, under an advisory lock
+
+**Decision.** `apps/api` runs the migrations at startup, holding
+`pg_advisory_lock(776155301)` while it does.
+
+**Why on boot.** Phase 7's exit criterion is that a fresh machine with a container runtime
+brings the whole system up with one command. A service that starts, finds a schema it does not
+recognise and fails is not that, and a separate migration step somebody must remember is the
+same problem with more documentation.
+
+**Why the lock.** Two replicas starting together would both find migration `0007` unapplied
+and both try to create the table; one would crash-loop on a duplicate-object error at exactly
+the moment you are deploying. The checksum runner makes an *edited* migration a loud error
+(D-023) but says nothing about two processes racing on an unapplied one. An advisory lock is
+held on a connection and released when it closes, so a replica that dies mid-migration does not
+wedge the next one.
+
+**Cost accepted.** Boot is serialised across replicas by however long the slowest migration
+takes. That is paid once per deploy, and the alternative — a deployment step whose omission is
+discovered by a running service — is paid at the worst possible moment.
+
+---
+
+## D-057 · 2026-08-18 · Bank evidence arrives as an uploaded statement, and a feed is an adapter behind the same boundary
+
+**Decision.** The only bank rail built is `POST /ingest/bank`, taking a statement export as
+bytes. No direct corporate-bank integration and no open-banking aggregator is wired in. When
+one is, it goes behind exactly the boundary the upload uses today: bytes or records in, an
+`Evidence` record with a hash and a parser version out, canonical `BankStatementLine`s
+after that, and nothing downstream learning where they came from.
+
+**Why upload first.** It is the capability that works at every Nigerian bank on the first
+day, needs no consent flow, no vendor and no per-bank certification, and it produces the
+same canonical records a feed would. Nigeria has an open-banking standard and a regulatory
+framework, but coverage, freshness and field completeness are integration-specific facts
+about a particular bank and a particular provider — and they are facts you learn by trying,
+not by reading. Building the feed first would mean discovering, in production, that a
+statement we already know how to parse would have answered the question sooner.
+
+**What a feed must model, and why it is not free.** An aggregator does not return "the
+transactions"; it returns transactions *and a data-availability state* — Mono, for example,
+reports states such as `PARTIAL` and `UNAVAILABLE`. A reconciler handed a partial day and
+told nothing would conclude that money we were paid never arrived, raise
+`MISSING_SETTLEMENT` against payouts that are perfectly fine, and — worse — would let
+`clearVanished` close real exceptions because the credits explaining them were simply not in
+the window it was given (D-044). So the adapter must carry the state through as data, and
+a run over incomplete evidence must be *scoped* rather than treated as a run over
+everything. That is a real piece of design, and it is the reason this is a decision rather
+than a to-do.
+
+**Consequence for the merchant model.** In a multi-merchant deployment it is each merchant's
+own finance admin who links their corporate account, once. The paying customers never do,
+and never see it — their bank is the PSP's problem, not ours. Nothing about the three-record
+model changes: the account being read is *our* account, which is what makes its statement
+the only evidence that may book cash (D-027).
+
+**Cost accepted.** Somebody exports a statement and uploads it, daily. It is idempotent by
+content address, so a double upload is free and a re-upload after a parser fix is free too —
+but it is a human step, and it is the step a feed removes.

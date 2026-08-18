@@ -1,4 +1,4 @@
-# @recon/reconciler — Phase 3 (built), Phase 4 (not yet)
+# @recon/reconciler — Phases 3 and 4
 
 **The engine that explains the difference.** Three records arrive from three directions —
 a webhook says a customer paid, a PSP report says a payout is coming, a bank statement says
@@ -6,7 +6,9 @@ cash landed — and this decides which of them are about the same money, names e
 difference between them, and writes the ledger transaction that closes each one.
 
 **Depends on:** `@recon/canon`, `@recon/ledger-core`.
-**Imported by:** `apps/pipeline` today, `apps/api` in Phase 6.
+**Imported by:** `apps/api`, `apps/pipeline`, and `@recon/policy` — which is the only thing
+allowed to hand it a source's calendar and fee model, because the matcher must never be able
+to look one up (Law 7).
 
 Pure domain logic. Deterministic. No HTTP, no clock — `asOf` is always passed in, so a run
 can be replayed and produce the identical partition (Law 5).

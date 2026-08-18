@@ -1,7 +1,7 @@
 # You do not containerise the packages. You containerise the app — and the packages come
 # along for the ride, because the app depends on them. From the app's point of view
-# @recon/ledger-core is a dependency no different in kind from pg; the only difference is
-# that it comes from this repo instead of the registry. Both end up inside the image.
+# @recon/ledger-core is a dependency no different in kind from Fastify; the only difference
+# is that it comes from this repo instead of the registry. Both end up inside the image.
 
 FROM node:20-alpine AS build
 WORKDIR /app
@@ -12,7 +12,11 @@ COPY package.json package-lock.json ./
 COPY packages/canon/package.json       packages/canon/
 COPY packages/ledger-core/package.json packages/ledger-core/
 COPY packages/ingest/package.json      packages/ingest/
+COPY packages/reconciler/package.json  packages/reconciler/
+COPY packages/policy/package.json      packages/policy/
+COPY packages/inbox/package.json       packages/inbox/
 COPY apps/pipeline/package.json        apps/pipeline/
+COPY apps/api/package.json             apps/api/
 
 # `npm ci` installs exactly what the lockfile says — the difference between a
 # reproducible image and one that quietly picks up a new minor version next Tuesday.
@@ -43,7 +47,14 @@ COPY --from=build /app/apps         ./apps
 USER node
 
 # The database lives in its own container; the address arrives as configuration, and no
-# secret is ever baked into the image.
+# secret is ever baked into the image. RECON_API_KEY and the per-source webhook secrets
+# arrive the same way — the service refuses to start without the first (D-052).
 ENV DATABASE_URL=""
+ENV PORT=8080
 
-CMD ["node", "apps/pipeline/dist/main.js", "demo"]
+EXPOSE 8080
+
+# The line that decides what this image *is*. The CLI is still in here and still runs —
+# `docker compose run --rm api node apps/pipeline/dist/main.js balances` — because one set
+# of libraries with two ways to run them is the whole point of the apps/packages split.
+CMD ["node", "apps/api/dist/main.js"]

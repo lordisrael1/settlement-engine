@@ -36,6 +36,7 @@
  *   exceptions.ts the queue: differences with a lifecycle, and how they clear themselves
  *   store.ts      where the three records, the evidence and the conclusions live
  *   run.ts        loading, matching, booking
+ *   summary.ts    what all of it added up to, over a period
  */
 
 export {
@@ -64,6 +65,7 @@ export {
   openExceptions,
   raiseExceptions,
   resolveByHuman,
+  resolveException,
   type ExceptionDraft,
   type QueueFilter,
   type RaiseOutcome,
@@ -128,6 +130,14 @@ export {
   type ResolutionOptions,
   type Stored,
 } from './store.js';
+
+export {
+  summarize,
+  type ConclusionTally,
+  type QueueTally,
+  type ReconciliationSummary,
+  type SummaryWindow,
+} from './summary.js';
 
 export {
   reconcile,

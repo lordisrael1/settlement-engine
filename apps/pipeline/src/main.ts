@@ -14,6 +14,7 @@ import {
   replay,
   runMigrations,
 } from '@recon/ledger-core';
+import { buildPolicy } from '@recon/policy';
 import {
   reconcile,
   recordBankLines,
@@ -24,7 +25,6 @@ import {
 } from '@recon/reconciler';
 
 import { runDemo } from './demo.js';
-import { buildPolicy } from './policy.js';
 
 /**
  * Whose books these are.

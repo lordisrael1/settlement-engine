@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc --build",
     "clean": "tsc --build --clean",
-    "test": "npm run build && node --test \"packages/*/dist/**/*.test.js\""
+    "test": "npm run build && node --test \"packages/*/dist/**/*.test.js\" \"apps/*/dist/**/*.test.js\""
   },
   "devDependencies": {
     "typescript": "^5.6.3"

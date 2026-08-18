@@ -119,6 +119,42 @@ up. It must not: the moment it can reach a source table, it can branch on a sour
 ingest's calendars to the contracts in the database. That is what `apps/pipeline/src/policy.ts`
 is, and it is the whole of it — the conductor wiring two sections together, owning no logic.
 
+## `packages/inbox` — the durable acceptance rail
+
+**Problem it solves.** A PSP webhook is the one inbound record whose timing we do not
+choose. Somebody else's process, with a retry timer already running, is holding a connection
+open waiting for an answer — and the only answer that can honestly be given in a couple of
+milliseconds is *"we safely received this event"*. Booking, matching and notifying before
+replying makes a provider believe a payment was never delivered every time any of those is
+briefly slow, so it redelivers, and a queue that was merely slow becomes one that is growing.
+
+**What it is.** One table and two functions. `accept` verifies nothing and interprets
+nothing — it writes the raw bytes, keyed by their own SHA-256, and returns. `drain` claims
+deliveries with `FOR UPDATE SKIP LOCKED`, one database transaction per delivery, and hands
+each to a callback that decides what it meant. Scaling the workers is starting more of them.
+
+**Its place in the graph.** Depends on `canon` and `ledger-core` (the pool and the
+transaction helper). Notably **not** on `ingest`: this package knows deliveries exist and
+that somebody can interpret them, and has never heard of a signature scheme or a payment.
+The handler is supplied by the deployable, which is where ingest meets the ledger.
+
+See [DECISIONS.md § D-050](DECISIONS.md).
+
+## `packages/policy` — the seam
+
+**Problem it solves.** The matcher needs a business calendar and a fee model per source. The
+calendar is declared by `ingest`; the contracts live in the database. `reconciler` may
+import neither, because the moment it can read a source table it can branch on a source name
+(Law 7). Something has to join them.
+
+**What it is.** One function, `buildPolicy(db, merchantId)`, containing no logic beyond the
+join. It lived in `apps/pipeline` while the CLI was the only deployable; two deployables
+would have meant two copies of the rule that decides when money is late, and two copies can
+disagree. It is the only package that imports both `ingest` and `reconciler`, and the only
+one whose dependency shape otherwise looks like an app's.
+
+See [DECISIONS.md § D-055](DECISIONS.md).
+
 ## `apps/api` — the one thing that actually runs
 
 **Problem it solves.** All of the above are libraries that cannot run by themselves.
@@ -126,14 +162,31 @@ Something has to be a live, long-lived process: bind a port, accept HTTP, receiv
 expose balances and exceptions, kick off reconciliation runs — and wire the libraries
 together. That is the app.
 
-**What it is.** Phase 6: the Fastify service. Its job is deliberately thin — own the
-transport and the contract (HTTP, auth, signature verification, status codes), then delegate
-all thinking to the packages. An inbound webhook: the API verifies it is authentic
-(transport concern), hands the raw payload to `ingest` (meaning concern), and the resulting
-canonical event goes to `ledger-core`. A settlement upload: the API receives the file,
-`ingest` normalises it, `reconciler` matches it. **The API is the conductor; the packages
-are the orchestra.** It contains no business logic itself — if you find a Law being enforced
-in `apps/api`, it is in the wrong place.
+**What it is.** Phase 6: the Fastify service, and three inbound rails that stay separate all
+the way down.
+
+```
+POST /webhooks/:source      verify the signature over the raw bytes → one inbox row → 200
+   (a worker, later)        ingest normalises it → ledger-core books the promise
+
+POST /ingest/settlement/:source   the PSP's claim  → evidence + payouts. Books nothing.
+POST /ingest/bank                 our bank's proof → evidence + statement lines.
+
+POST /reconcile/runs        stage two, then stage three. The only path that books cash.
+```
+
+The split between the first rail and the other two is not stylistic. A webhook is
+asynchronous because a remote system is on a retry timer; an upload is synchronous because
+the operator waiting for it would rather have the counts than a receipt (D-051).
+
+Its job is deliberately thin — own the transport and the contract (HTTP, auth, signature
+verification, status codes, JSON representation), then delegate all thinking to the
+packages. **The API is the conductor; the packages are the orchestra.** Every handler is
+three lines: parse the request, call one package function, serialise the answer. When a
+route needed to do more than that — resolving an exception, which is a decision, a
+compensating entry and a queue closure in one transaction — the composition moved into the
+reconciler rather than the handler (D-054). If you find a Law being enforced in `apps/api`,
+it is in the wrong place.
 
 **Its place in the graph.** It sits at the top: it depends on all the packages; nothing
 depends on it. That *"depends on everything, depended on by nothing"* shape is the signature
@@ -141,17 +194,22 @@ of a deployable — and it is exactly why the app, and only the app, is what you
 
 ---
 
-## `apps/pipeline` — the deployable that exists today
+## `apps/pipeline` — the other deployable
 
-Phase 6's Fastify service is not built yet, and Phase 7 needs a program to containerise.
-`apps/pipeline` is that program: a CLI over the same libraries — `migrate`, `demo`,
-`balances`, `verify`, `ingest-settlement`.
+A CLI over the same libraries — `migrate`, `demo`, `balances`, `verify`,
+`ingest-settlement`, `ingest-bank`, `reconcile`, `exceptions`, `replay`. It was built first,
+because containerisation was brought forward and a container needs a program
+([D-022](DECISIONS.md)).
 
-It occupies exactly the position `apps/api` will occupy, and obeys the same rule: it owns
-no business logic, only transport and dispatch. When the service arrives it *joins* this
-one rather than replacing it — a service and a CLI over one set of libraries is precisely
-the reuse the library/deployable split exists to allow, and nothing under `packages/`
-changes when it lands. See [DECISIONS.md § D-022](DECISIONS.md).
+The service **joined** it rather than replacing it, exactly as that entry said it would: a
+service for the traffic and a CLI for the operator, over one set of libraries. Nothing under
+`packages/` changed when the service landed — the one thing that moved was `buildPolicy`,
+which moved *out* of this app into a package because both deployables now need it, and two
+copies of it could disagree.
+
+The CLI remains the right tool for the things a service is the wrong tool for: a scheduled
+`replay` proving the books rebuild from the log, a one-off `ingest-settlement` against a file
+on somebody's laptop, and the narrated `demo`.
 
 ---
 
@@ -160,24 +218,27 @@ changes when it lands. See [DECISIONS.md § D-022](DECISIONS.md).
 Dependencies only ever point downward toward `canon`. No cycles.
 
 ```
-       apps/pipeline (today)          apps/api (Phase 6)     ← deployables; nothing
-              \                        /   |    \    \          depends on them
-               \                      /    |     \    \
-                \   packages/reconciler    |      \    \       (Phase 3)
-                 \      |    \             |       \    \
-                  \     |     \            |        \    \
-          packages/ledger-core  \          |    packages/ingest  →  @pay-normalize/*
-                       \         \         |        /
-                        \         \        |       /
-                         \         \       |      /
-                              packages/canon               ← the leaf; depends on nothing
+        apps/pipeline                         apps/api          ← deployables; nothing
+             \    \                          /   /   |  \          depends on them
+              \    \       packages/policy  /   /    |   \
+               \    \       /      |      \/   /     |    \
+                \    \     /       |      /\  /      |     \
+                 \  packages/reconciler  /  \/       |   packages/inbox
+                  \      |      \       /   /\       |      /
+              packages/ledger-core \   /   /  packages/ingest  →  @pay-normalize/*
+                          \         \ /   /       /
+                           \         X   /      /
+                                packages/canon             ← the leaf; depends on nothing
 ```
 
 Read as edges (`A → B` means "A imports B"):
 
 | From | Imports |
 |---|---|
-| `apps/pipeline`, `apps/api` | `canon`, `ledger-core`, `ingest`, `reconciler` |
+| `apps/api` | `canon`, `ledger-core`, `ingest`, `reconciler`, `policy`, `inbox`, `fastify` |
+| `apps/pipeline` | `canon`, `ledger-core`, `ingest`, `reconciler`, `policy` |
+| `policy` | `canon`, `ledger-core`, `ingest`, `reconciler` |
+| `inbox` | `canon`, `ledger-core`, `pg` |
 | `reconciler` | `canon`, `ledger-core` |
 | `ingest` | `canon`, `@pay-normalize/*` |
 | `ledger-core` | `canon`, `pg` |
@@ -186,12 +247,18 @@ Read as edges (`A → B` means "A imports B"):
 That acyclic, one-directional shape is what makes the system reasoned-about and testable —
 and it is the thing a senior reviewer checks first.
 
-Two edges are deliberately **absent**, and their absence is load-bearing:
+Three edges are deliberately **absent**, and their absence is load-bearing:
 
 - `ingest` does **not** import `ledger-core`. Ingest produces canonical events; deciding
   what to do with them is someone else's job. This is what keeps ingest a pure translator.
 - `ledger-core` does **not** import `ingest`. The ledger must be provable in complete
   isolation from where its inputs came from — that is Law 7 expressed as a missing arrow.
+- `reconciler` does **not** import `ingest`. The matcher would then be able to look up a
+  source and branch on its name. `packages/policy` exists precisely so that the join can
+  happen somewhere that decides nothing.
+
+`inbox` shares the discipline from the other side: it does not import `ingest` either, so it
+can store and hand back a delivery without any opinion about what a delivery means.
 
 ---
 
@@ -225,9 +292,9 @@ So the container-building process, concretely, in a monorepo:
    package code included — because you cannot run `apps/api` without the `ledger-core` code
    it calls, that code is now baked in.
 4. **Declare how to run.** The Dockerfile sets the start command —
-   `node apps/pipeline/dist/main.js demo` today, and the Fastify service in Phase 6, at
-   which point it also exposes the port. This is the line that decides what the image
-   *is*; everything above it is the same either way.
+   `node apps/api/dist/main.js`, and exposes the port it binds. This is the line that
+   decides what the image *is*; everything above it is the same either way, which is why
+   the same image also runs the CLI when you override the command.
 5. **`docker build` freezes all of that into an image** — the sealed artifact. Not an
    `.exe`: an image containing Linux + Node + the app + all four packages' compiled code +
    external deps, sealed together.
@@ -238,14 +305,16 @@ So the container-building process, concretely, in a monorepo:
    variable). `docker compose up` starts both and connects them.
 
 That is the containerised backend service: `docker compose up` launches the Fastify
-`apps/api` container — carrying `canon`, `ledger-core`, `ingest`, and `reconciler` compiled
-inside it — alongside a Postgres container, wired together, running identically on a laptop
-or on AWS. **The packages made the code correct and separable; the app made it runnable;
-the container made it reproducible anywhere.**
+`apps/api` container — carrying `canon`, `ledger-core`, `ingest`, `reconciler`, `policy` and
+`inbox` compiled inside it — alongside a Postgres container, wired together, running
+identically on a laptop or on AWS. **The packages made the code correct and separable; the
+app made it runnable; the container made it reproducible anywhere.**
 
 One clean way to hold the whole thing: *the packages are the organs, the app is the body
 that runs on them, and the container is the sealed environment the body lives in — you ship
 the body (with its organs inside), not each organ separately.*
 
-This is Phase 7. Nothing about it should require changing a single line inside the packages,
-and if it does, the layering above was wrong.
+This is Phase 7, and Phase 6 landing on top of it was the test of the claim: the service
+arrived, the Dockerfile changed by one command line and two manifest copies, and not one
+line inside `canon`, `ledger-core`, `ingest` or `reconciler` had to change to accommodate
+HTTP. If it ever does, the layering above was wrong.

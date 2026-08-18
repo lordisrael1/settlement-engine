@@ -26,7 +26,12 @@
  * a layer that is allowed to know ledgers exist.
  */
 
-export { ingestWebhook, type WebhookIngestInput, type WebhookIngestResult } from './webhook.js';
+export {
+  ingestWebhook,
+  verifyWebhook,
+  type WebhookIngestInput,
+  type WebhookIngestResult,
+} from './webhook.js';
 
 export {
   ingestSettlement,

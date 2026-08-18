@@ -1,0 +1,25 @@
+{
+  "name": "@recon/policy",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The seam: ingest's calendars joined to the database's fee contracts, for the matcher.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@recon/canon": "0.0.0",
+    "@recon/ingest": "0.0.0",
+    "@recon/ledger-core": "0.0.0",
+    "@recon/reconciler": "0.0.0"
+  }
+}

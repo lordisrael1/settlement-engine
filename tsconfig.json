@@ -5,6 +5,9 @@
     { "path": "packages/ledger-core" },
     { "path": "packages/ingest" },
     { "path": "packages/reconciler" },
-    { "path": "apps/pipeline" }
+    { "path": "packages/policy" },
+    { "path": "packages/inbox" },
+    { "path": "apps/pipeline" },
+    { "path": "apps/api" }
   ]
 }

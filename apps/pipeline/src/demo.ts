@@ -22,6 +22,7 @@ import {
   reverse,
   UnbalancedTransactionError,
 } from '@recon/ledger-core';
+import { buildPolicy } from '@recon/policy';
 import {
   allocationsOf,
   matchOf,
@@ -34,7 +35,6 @@ import {
   saveFeeContract,
 } from '@recon/reconciler';
 
-import { buildPolicy } from './policy.js';
 import {
   heading,
   line,

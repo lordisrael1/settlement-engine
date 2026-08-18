@@ -5,20 +5,12 @@ import type { Executor } from '@recon/ledger-core';
 import { loadFeeContracts, type PolicyLookup, type SourcePolicy } from '@recon/reconciler';
 
 /**
- * The seam between the three halves of the system, and it is one function long.
+ * Everything the matcher is told about every source, assembled once.
  *
- * The reconciler needs to know, per source, when money is late and what we expected to be
- * charged. Neither fact is its to hold: the business calendar is declared by the ingest
- * layer alongside the adapter that knows the rail, and fee contracts are administered
- * data with effective dates and an approver, so they live in the database.
- *
- * Neither package imports the other — the reconciler cannot, because then it could branch
- * on a source name (Law 7) — so the deployable fetches both and hands over a lookup. This
- * is what "the app is the conductor" means concretely: no business logic, just wiring.
- *
- * Contracts are loaded once per run rather than per payment. A reconciliation is a
- * snapshot taken at `asOf`, and re-reading the contract table halfway through would let a
- * concurrent edit change the answer partway down the file.
+ * Contracts are loaded once per run rather than per payment. A reconciliation is a snapshot
+ * taken at `asOf`, and re-reading the contract table halfway through would let a concurrent
+ * edit change the answer partway down the file — the same run reaching two different
+ * conclusions about two identical payments (Law 5).
  */
 export async function buildPolicy(
   db: Executor,

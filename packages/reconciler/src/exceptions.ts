@@ -1,11 +1,14 @@
 import type {
+  ApprovalPolicy,
   ExceptionState,
   ExceptionSubject,
   MatchResult,
   Money,
   ReasonCode,
+  RecordedResolution,
   ReconciliationException,
   RejectedCandidate,
+  Resolution,
   ResolutionCause,
 } from '@recon/canon';
 import {
@@ -15,8 +18,10 @@ import {
   reasonKind,
   severityOf,
 } from '@recon/canon';
-import type { Executor } from '@recon/ledger-core';
+import type { EntryInput, Executor } from '@recon/ledger-core';
 import { appendEvent, inTransaction } from '@recon/ledger-core';
+
+import { recordResolution } from './store.js';
 
 /**
  * The queue — and the machinery that keeps it honest between runs.
@@ -292,6 +297,57 @@ export async function resolveByHuman(
     actor,
     cause: 'resolved_by_human',
     resolutionKey,
+  });
+}
+
+/**
+ * A person answers a queue item: the decision, its compensating entry, and the closure —
+ * one write.
+ *
+ * The three were already separately available, and letting a caller sequence them itself is
+ * how you get the state this system exists to prevent: an entry posted whose justification
+ * failed to save, or an exception closed pointing at a resolution that was never written.
+ * Both look, afterwards, exactly like money moved for no reason. So they are one database
+ * transaction, and the composition lives here rather than in whichever deployable happened
+ * to need it first.
+ *
+ * `recordResolution` keeps its own rules — maker-checker, no entry may touch `bank_account`
+ * — and they are not restated here. This adds only the queue's half of the answer.
+ *
+ * Returns `null` when there is no such exception. That is not an error: an operator
+ * resolving a key that has already been cleared by evidence arriving is a race between a
+ * person and a settlement file, and the settlement file is allowed to win.
+ */
+export async function resolveException(
+  db: Executor,
+  input: {
+    readonly key: string;
+    readonly resolution: Resolution;
+    readonly entries?: readonly EntryInput[];
+    readonly policy?: ApprovalPolicy;
+  },
+): Promise<{ recorded: RecordedResolution; closed: boolean } | null> {
+  return inTransaction(db, async (client) => {
+    const existing = await client.query<{ state: ExceptionState }>(
+      'SELECT state FROM exceptions WHERE exception_key = $1',
+      [input.key],
+    );
+    if (!existing.rows[0]) return null;
+
+    const recorded = await recordResolution(client, input.resolution, {
+      ...(input.entries ? { entries: input.entries } : {}),
+      ...(input.policy ? { policy: input.policy } : {}),
+    });
+
+    const closed = await resolveByHuman(
+      client,
+      input.key,
+      input.resolution.resolvedBy,
+      input.resolution.resolutionKey,
+      input.resolution.resolvedAt,
+    );
+
+    return { recorded, closed };
   });
 }
 

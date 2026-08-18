@@ -11,6 +11,7 @@
     { "path": "../../packages/ledger-core" },
     { "path": "../../packages/ingest" },
     { "path": "../../packages/reconciler" },
-    { "path": "../../packages/policy" }
+    { "path": "../../packages/policy" },
+    { "path": "../../packages/inbox" }
   ]
 }

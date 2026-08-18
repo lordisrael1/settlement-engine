@@ -31,6 +31,27 @@ export type WebhookIngestResult =
   | { readonly kind: 'rejected'; readonly reason: string };
 
 /**
+ * Is this delivery authentic?
+ *
+ * The whole of the question the transport layer is allowed to ask, separated out because
+ * the answer is worth having *before* anything is interpreted. A service that accepts
+ * deliveries durably and interprets them afterwards (see `@recon/inbox`) needs exactly
+ * this in the request path and nothing else: verification is a keyed hash over bytes we
+ * already hold, while interpretation is work that can wait and, on a bad day, fail.
+ *
+ * Signature schemes differ per provider — HMAC-SHA512 in hex here, HMAC-SHA256 in base64
+ * there — and that knowledge stays inside the connector, which is why this takes a source
+ * and not a scheme.
+ */
+export function verifyWebhook(input: WebhookIngestInput): boolean {
+  return sourceProfile(input.source).connector.verifyWebhookSignature({
+    headers: input.headers,
+    rawBody: toRawBody(input.rawBody),
+    secret: input.secret,
+  });
+}
+
+/**
  * Turn one inbound webhook delivery into a canonical promise.
  *
  * The order of operations is a security property, not a preference: verify first, parse
@@ -42,15 +63,9 @@ export type WebhookIngestResult =
  * at all is a decision for a layer that is allowed to know about ledgers.
  */
 export function ingestWebhook(input: WebhookIngestInput): WebhookIngestResult {
+  if (!verifyWebhook(input)) return { kind: 'unverified' };
+
   const { connector } = sourceProfile(input.source);
-
-  const verified = connector.verifyWebhookSignature({
-    headers: input.headers,
-    rawBody: toRawBody(input.rawBody),
-    secret: input.secret,
-  });
-  if (!verified) return { kind: 'unverified' };
-
   const parsed = connector.parseWebhook(toRawBody(input.rawBody));
 
   if (parsed.kind === 'unknown_event') {

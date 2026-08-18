@@ -29,15 +29,52 @@ services:
       timeout: 3s
       retries: 30
 
-  pipeline:
+  api:
     build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '8080:8080'
+    environment:
+      DATABASE_URL: postgres://recon:recon@postgres:5432/recon
+      # Development values, and obviously so. A deployment supplies these from its own
+      # secret store; nothing here is ever baked into the image. The service refuses to
+      # start without an API key rather than quietly serving the management endpoints
+      # unauthenticated (D-052).
+      RECON_API_KEY: local-dev-key-0123456789
+      # The secret each provider signs its deliveries with. A source with no secret gets a
+      # 503 and nothing is stored — an honest "we cannot authenticate this" rather than a
+      # payment accepted on trust. These two match the demo's fixtures.
+      RECON_WEBHOOK_SECRET_PAYSTACK: sk_test_demo_secret
+      RECON_WEBHOOK_SECRET_FLUTTERWAVE: flw_test_demo_secret_hash
+      RECON_MERCHANT: demo-merchant
+      RECON_BANK_ACCOUNT: gtb-3011
+      RECON_BANK: gtbank
+    healthcheck:
+      # Reports the database *and* how far behind the inbox workers are. A service that
+      # accepts deliveries and quietly stops working them is the failure this architecture
+      # is most exposed to, and a bare "the port is open" check would hide it completely.
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:8080/health || exit 1']
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  # The other deployable, over the same libraries and the same image. Not started with the
+  # system — it is run on demand:
+  #
+  #   docker compose run --rm cli node apps/pipeline/dist/main.js demo
+  #   docker compose run --rm cli node apps/pipeline/dist/main.js replay --rebuild
+  cli:
+    build: .
+    profiles: ['cli']
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://recon:recon@postgres:5432/recon
-    # Override to run any other command against the same system, e.g.
-    #   docker compose run --rm pipeline node apps/pipeline/dist/main.js balances
+      RECON_MERCHANT: demo-merchant
+      RECON_BANK_ACCOUNT: gtb-3011
     command: ['node', 'apps/pipeline/dist/main.js', 'demo']
 
 volumes:
