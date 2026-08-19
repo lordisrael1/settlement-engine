@@ -7,7 +7,10 @@ FROM node:20-alpine AS build
 WORKDIR /app
 
 # Manifests first, so a source-only change does not re-run the install. npm needs every
-# workspace manifest present to resolve the internal links, hence the one-by-one copies.
+# workspace manifest present to resolve the internal links, hence the one-by-one copies —
+# `COPY packages/*/package.json` flattens the paths and would land them all on top of each
+# other. A new workspace must be added to this list; leaving it out fails `npm ci` at build
+# time with the missing package named, which is the right place for that to be noticed.
 COPY package.json package-lock.json ./
 COPY packages/canon/package.json       packages/canon/
 COPY packages/ledger-core/package.json packages/ledger-core/
@@ -15,6 +18,7 @@ COPY packages/ingest/package.json      packages/ingest/
 COPY packages/reconciler/package.json  packages/reconciler/
 COPY packages/policy/package.json      packages/policy/
 COPY packages/inbox/package.json       packages/inbox/
+COPY packages/simulator/package.json   packages/simulator/
 COPY apps/pipeline/package.json        apps/pipeline/
 COPY apps/api/package.json             apps/api/
 

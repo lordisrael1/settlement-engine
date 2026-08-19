@@ -25,6 +25,7 @@ import {
 } from '@recon/reconciler';
 
 import { runDemo } from './demo.js';
+import { runSimulation } from './simulate.js';
 
 /**
  * Whose books these are.
@@ -63,6 +64,7 @@ const MIGRATIONS = [LEDGER_MIGRATIONS_DIR, RECONCILER_MIGRATIONS_DIR];
 const COMMANDS = [
   'migrate',
   'demo',
+  'simulate',
   'balances',
   'verify',
   'ingest-settlement',
@@ -99,6 +101,25 @@ async function main(argv: readonly string[]): Promise<number> {
         const ok = await runDemo(pool);
         line(ok ? '\x1b[32mAll invariants held.\x1b[0m' : '\x1b[31mAn invariant failed.\x1b[0m');
         return ok ? 0 : 1;
+      }
+
+      /**
+       * Phase 8, driven rather than asserted.
+       *
+       * Generates one messy settlement day from a seed, pushes every byte of it through the
+       * real boundary in whatever order was asked for, and reports what a human is left
+       * with. Exits non-zero if the books miss the arithmetic or the queue holds anything
+       * beyond the single planted phantom — so it is a test you can watch.
+       */
+      case 'simulate': {
+        const seed = Number(argv[1] ?? 1);
+        if (!Number.isInteger(seed) || seed < 0) {
+          console.error('usage: simulate [seed] [--reverse]');
+          return 2;
+        }
+        // Migrates nothing here: this command opens a schema of its own and migrates that,
+        // because the books it prints are only meaningful if nothing else wrote to them.
+        return (await runSimulation(seed, argv.includes('--reverse'))) ? 0 : 1;
       }
 
       case 'balances': {

@@ -1,0 +1,26 @@
+{
+  "name": "@recon/simulator",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The adversary: seeded, deterministic settlement files with planted anomalies.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@pay-normalize/nomba": "^0.1.2",
+    "@recon/canon": "0.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2"
+  }
+}

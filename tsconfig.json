@@ -7,6 +7,7 @@
     { "path": "packages/reconciler" },
     { "path": "packages/policy" },
     { "path": "packages/inbox" },
+    { "path": "packages/simulator" },
     { "path": "apps/pipeline" },
     { "path": "apps/api" }
   ]

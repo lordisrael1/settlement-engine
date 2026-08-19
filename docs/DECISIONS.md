@@ -1385,3 +1385,147 @@ the only evidence that may book cash (D-027).
 **Cost accepted.** Somebody exports a statement and uploads it, daily. It is idempotent by
 content address, so a double upload is free and a re-upload after a parser fix is free too —
 but it is a human step, and it is the step a feed removes.
+
+---
+
+## D-058 · 2026-08-19 · The adversarial simulator is a package, and it emits bytes rather than records
+
+**Decision.** Phase 8's simulator is `packages/simulator`: a pure, seeded generator that
+produces **provider-format files and signed webhook deliveries**, plus a declared statement
+of what each planted anomaly is. It does not touch a database, a clock or a filesystem, and
+it depends on `@recon/canon` and one connector's signing helpers — nothing else.
+
+**Why bytes and not canonical records.** A simulator that handed the matcher a `Payout`
+object would exercise the matcher and skip the boundary, and the boundary is where a real
+settlement export actually goes wrong: a fee type nobody has seen, a declared net that
+disagrees with its own itemisation, a currency we do not keep books in, a row that is a
+debit. Every record the suite reconciles is one the real ingest layer produced from bytes
+the real signature check accepted, which is the only way the test covers Phase 2 as well as
+Phase 3.
+
+**Why a package rather than a test fixture.** Two consumers already want the same messy day:
+the Phase 8 suite asserts against it, and `apps/pipeline simulate` narrates it. Phase 9's
+scripted demo wants exactly the same file a third time. A generator living inside one test
+file would be copied on first reuse, and the copy would drift.
+
+**Why it is the one file outside `packages/ingest` allowed to name a provider.** It signs
+the way each provider signs — four schemes across four connectors — because here we are
+*being* the remote systems, not processing their data. This is the same exemption
+`apps/pipeline`'s demo signer already carries, and it is stated in both places rather than
+assumed. Nomba's canonical string is built with Nomba's own exported helpers: a second
+implementation of a signing scheme is a second thing that can be wrong, and a simulator
+whose signatures are wrong tests the 401 path very thoroughly and nothing else.
+
+**Alternative rejected: derive the ground truth by running the engine.** It would have been
+less code and it would have asserted nothing. Truth computed from the thing under test is
+the engine agreeing with itself, which it does just as cheerfully when it is wrong. So what
+each anomaly *is* — and where the books must land, to the kobo — is declared at the moment
+it is planted.
+
+---
+
+## D-059 · 2026-08-19 · Generated amounts carry a kobo salt, so the matcher is never asked to guess
+
+**Decision.** Every promise the simulator generates is a whole-hundred-naira base plus a
+distinct power-of-two **kobo** salt: ₦12,500.01, ₦8,300.02, ₦45,000.04. Batches are capped
+at thirteen promises, because `2^13 − 1 = 8191` kobo is the largest salt sum that still fits
+under ₦100.
+
+**Why.** A payout is matched by finding the unique subset of promises summing to its gross,
+and the matcher refuses to guess when two subsets fit equally well — correctly, and by
+design (D-035). Amounts drawn naively collide: ₦5,000 + ₦15,000 and ₦8,000 + ₦12,000 are the
+same payout. A seed that happened to draw both would escalate a payout that was going
+perfectly well, and the suite would be red for a reason that is not a defect. With the salt,
+a subset's total modulo ₦100 *is* the sum of its salts, which identifies the subset uniquely.
+
+**Why it is not cheating.** Ambiguity is not being hidden — it is being tested *on purpose*,
+in its own scenario, with the assertion that the matcher escalates rather than picking one.
+Making it impossible by accident and mandatory by intent is the difference between a suite
+that measures the engine and one that measures the seed. And the amounts stay entirely
+ordinary-looking: odd kobo is what real Nigerian payment amounts contain.
+
+**Cost accepted.** The base scenario cannot exceed thirteen promises per source pool. The
+generator throws, naming the seed, rather than silently producing an ambiguous day.
+
+---
+
+## D-060 · 2026-08-19 · Arrival order is an argument, and the final state may not depend on it
+
+**Decision.** The harness applies a scenario's arrivals in a caller-supplied order,
+reconciling after each one, and the suite asserts that every order reaches byte-identical
+balances and an identical queue.
+
+**Why this is the Phase 8 test that matters most.** Real evidence does not arrive in the
+order that makes it easy: a bank statement is exported before the PSP's report is available,
+a settlement file is uploaded two days late, a webhook is retried after both. Each of those
+orders passes through states the canonical order never visits — a credit that matches
+nothing yet, a payout with no promises to cover, a settlement line whose promise has not
+been booked — and each of those *raises an exception that must later clear itself*. If the
+final partition differed by order, the system would not have a reconciliation; it would have
+a race, and the answer would be whichever ordering happened to occur.
+
+**What it caught being true.** Under a reversed order the suite observes findings raised and
+then closed with cause `evidence_arrived`, and asserts that every one of them closed for
+that reason rather than being resolved by a person or left open. That is D-044's
+self-clearing queue demonstrated under adversarial conditions rather than asserted in a
+comment.
+
+**Not every permutation.** Six orders — canonical, reversed, and four seeded shuffles — not
+all 720. The shuffle seed is fixed and printed, so a failure is reproducible; running the
+full factorial would multiply the suite's runtime for coverage of orderings that differ from
+one already tested only in the position of two independent files.
+
+---
+
+## D-061 · 2026-08-19 · A `chargeback` settlement status cannot be reached through ingest, and the simulator says so rather than working around it
+
+**Decision.** The simulator's chargeback is a Flutterwave `chargeback` **deduction** folded
+into a payout, which books to the `chargebacks` account when the bank confirms it. It is not
+a settlement line carrying `SettlementStatus: 'chargeback'`, because no adapter can currently
+produce one.
+
+**The finding.** `packages/canon` defines `SettlementStatus` as `settled | reversed |
+chargeback`, and the matcher has a branch for the third — a clawback against an already
+`settled` promise books immediately via `bookChargeback`. But ingest's `SETTLED_STATUSES`
+maps only `SUCCESSFUL → settled` and `REVERSED → reversed`. There is no path from any
+connector's vocabulary to `chargeback`, so that matcher branch is unreachable from outside
+the process.
+
+**Why it is recorded rather than fixed here.** Adding a status mapping is a Phase 2 change to
+the anti-corruption boundary, and it should be made when a real provider file pins what the
+row looks like — the same discipline that keeps Paystack's settlement adapter `null` until a
+sanitized export exists. Inventing a mapping to make a test reachable would produce a parser
+that looks right and is wrong, which is worse than a documented gap.
+
+**Consequence.** The clawback path that *is* reachable is exercised end to end and books to
+the right account; the line-status path is dead code until a connector can produce it, and
+this entry is what stops that being discovered by accident.
+
+---
+
+## D-062 · 2026-08-19 · `simulate` opens a ledger of its own, because it asserts absolute balances
+
+**Decision.** The `simulate` command creates, drops and rebuilds a schema named after its
+seed — `simulator_seed_42` — migrates it, and runs there. It does not touch the default
+schema, and it migrates nothing else.
+
+**Why, found the hard way.** The command prints every account balance against what the
+scenario's own arithmetic says it should be. That is an *absolute* claim, and an absolute
+claim about a ledger is only meaningful if nothing else has written to it. Run against the
+shared schema it was measuring the demo's weather — and worse, two seeds could not coexist at
+all. Each scenario's fee contracts occupy the same scope `(flutterwave, simulated-merchant,
+card, NGN)` with the same dates, so seeding a second seed's contracts on top of a first
+raises `fee_contracts_no_overlap`.
+
+**The constraint was right and the command was wrong.** Two contracts in force at once for
+one scope is exactly the data error D-030's exclusion constraint exists to make impossible,
+and the honest response is not to widen the scope or to make the contract ids merchant-unique
+— it is to notice that a run whose whole output is "the books land exactly here" needs books
+nobody else wrote to. The Phase 8 suite already worked this out and gives every drive its own
+schema; the CLI had the same requirement and had not been given the same treatment.
+
+**Why named rather than random, and dropped rather than reused.** Named, so the books can be
+opened afterwards with `psql -c 'SET search_path = simulator_seed_42'` — a generated day you
+cannot inspect is a claim you have to take on trust. Dropped and rebuilt at the start, so the
+second run of a seed is the same narrative rather than the same narrative on top of
+yesterday's.

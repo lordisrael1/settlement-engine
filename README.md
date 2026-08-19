@@ -95,13 +95,34 @@ docker compose run --rm cli node apps/pipeline/dist/main.js replay --rebuild
 Run any of it a second time and nothing moves: every step is idempotent, which is Law 4
 demonstrated rather than asserted. For a clean narrative, `docker compose down -v` first.
 
+### The generated day
+
+The demo's messiness is hand-authored — it contains the anomalies somebody thought of. This
+one is **generated** from a seed, and it declares in advance what every planted anomaly is
+and where the books must land, to the kobo:
+
+```bash
+docker compose run --rm cli node apps/pipeline/dist/main.js simulate 42
+docker compose run --rm cli node apps/pipeline/dist/main.js simulate 42 --reverse
+```
+
+A renegotiated fee contract with payments on both sides of it, a reversal on a rail that
+never names its payouts, a chargeback folded in beside the fees, a correspondent-bank charge
+nobody announced, a payout still inside its window, and exactly one credit that belongs to
+nobody. Everything except the last is explained without a human, and the last is the only
+thing anybody is shown.
+
+`--reverse` delivers the bank statements *before* the reports that explain them. Every
+finding raised along the way has to close itself when the evidence lands, and the books have
+to end in exactly the same place. It exits non-zero if they do not.
+
 ## Test it
 
 ```bash
-npm install && npm test                    # the database suites skip themselves
+npm install && npm test                    # 79 tests; the database suites skip themselves
 
 docker compose up -d postgres
-DATABASE_URL=postgres://recon:recon@localhost:5432/recon npm test    # 148 tests
+DATABASE_URL=postgres://recon:recon@localhost:5432/recon npm test    # 158 tests
 ```
 
 The database tests need a real Postgres, because the invariants they check are enforced by
@@ -110,10 +131,11 @@ its own schema, so they can run concurrently without measuring each other's weat
 
 Among them: Phase 1's exit criterion (across ~1,200 random valid transactions, every cached
 balance equals its recomputed balance and the whole ledger still sums to zero), Phase 3's (a
-PSP report books nothing; an independent bank credit books everything), and Phase 6's (every
+PSP report books nothing; an independent bank credit books everything), Phase 6's (every
 capability reachable with correct status codes and auth, and a signed webhook flowing end to
 end into an `authorized` transaction — through the real router, via `app.inject()`, with no
-port bound).
+port bound), and Phase 8's (a generated day survives in every arrival order, and the one
+planted phantom is the only thing a human is shown).
 
 ## Status
 
@@ -127,7 +149,7 @@ port bound).
 | 5 · Event sourcing and replay | ✅ | [`packages/ledger-core/src/replay.ts`](packages/ledger-core/src/replay.ts) — a log written beside the ledger and folded back to prove it, see D-047 |
 | 6 · The API and the service | ✅ | [`apps/api`](apps/api) — three rails, a durable webhook inbox ([`packages/inbox`](packages/inbox)) and a worker that empties it, see D-050 |
 | 7 · Containerisation | ✅ | [`Dockerfile`](Dockerfile), [`docker-compose.yml`](docker-compose.yml) — brought forward, see D-022 |
-| 8 · Testing and chaos | partial | property, idempotency and invariant tests exist; the adversarial simulator is Phase 8 |
+| 8 · Testing and chaos | ✅ | [`packages/simulator`](packages/simulator) — a seeded adversary, driven in every arrival order, see D-058 |
 | 9 · Dashboard and demo | — | |
 
 **What works today.** A webhook from any of four sources is signature-verified, normalised,
@@ -156,10 +178,18 @@ uploaded as the bytes themselves, because the bytes are the evidence and their h
 identity. Nothing books cash except a reconciliation run finding a bank credit that confirms
 a payout.
 
-**What does not exist yet**: the adversarial simulator (Phase 8) and the dashboard (Phase
-9). And what the company's own product database contributes is deliberately nothing but a
-reference — *"customer A bought service X"* is a question for that database, joined on the
-payment reference this one stores (D-049).
+And none of it is taken on trust. A seeded adversary generates the settlement files, bank
+statements and signed deliveries of a deliberately messy day — a renegotiated fee contract
+with payments on both sides of it, a reversal, a chargeback, a bank charge nobody announced,
+a payout still inside its window, and one credit that belongs to nobody — declares in advance
+what each of those is and where the books must land, and then feeds them in *every arrival
+order*. Each order visits states the tidy one never does, raising findings that must clear
+themselves when the evidence lands, and all of them must end with the same balances, to the
+kobo, and the same single item in the queue.
+
+**What does not exist yet**: the dashboard (Phase 9). And what the company's own product
+database contributes is deliberately nothing but a reference — *"customer A bought service
+X"* is a question for that database, joined on the payment reference this one stores (D-049).
 
 ## Layout
 
@@ -170,6 +200,7 @@ packages/ingest        the anti-corruption boundary — no database, no I/O
 packages/reconciler    the matching engine                (Phase 3)
 packages/inbox         durable acceptance: store the delivery, answer, work it later
 packages/policy        the seam — ingest's calendars joined to the database's contracts
+packages/simulator     the adversary: seeded files with planted anomalies  (Phase 8)
 apps/api               the Fastify service                (Phase 6)
 apps/pipeline          the other deployable: a CLI over the same libraries
 ```

@@ -17,13 +17,18 @@ landed.
 
 The CLI is still the right tool for what a service is the wrong tool for: a scheduled
 `replay` proving the books rebuild from the log, a one-off ingest of a file on somebody's
-laptop, and the narrated `demo`.
+laptop, the narrated `demo`, and `simulate` — Phase 8's adversary with its answer printed
+rather than asserted, because "158 tests pass" and "here is the day it survived" are
+different kinds of evidence and only the second one can be watched.
 
 ## Commands
 
 ```bash
 migrate                            apply every migration once, checksum-verified
 demo                               the whole system, end to end, with commentary
+simulate [seed] [--reverse]        a generated messy day, driven and checked against its
+                                   own declared arithmetic; --reverse delivers the bank
+                                   statements before the reports that explain them
 balances                           current balances, derived from entries
 verify                             Law 6 and Law 1, checked right now
 replay [--rebuild]                 fold the event log from genesis and check every
