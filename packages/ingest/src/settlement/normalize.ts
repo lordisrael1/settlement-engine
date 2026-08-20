@@ -12,6 +12,7 @@ import type {
 } from '@recon/canon';
 import { arrayLineage, idempotencyKey } from '@recon/canon';
 
+import { DriftWatch, type DriftNote } from '../drift.js';
 import { toMoney } from '../kobo.js';
 import type { RejectedRow, SettlementContext, SettlementIngestResult } from './types.js';
 
@@ -28,9 +29,33 @@ const SETTLED_STATUSES: Readonly<Record<string, SettlementStatus>> = {
   REVERSED: 'reversed',
 };
 
+/**
+ * A note on where a *renamed* status actually surfaces, because it is not here.
+ *
+ * The reflex is to treat "a status we do not recognise" as this file's problem to detect.
+ * It is not, and the type says so: `txn.status` is a closed enum by the time it arrives,
+ * because each connector maps the provider's own vocabulary and returns a `parse_error` for
+ * anything unmapped. So a provider renaming `SUCCESSFUL` to `SUCCESS` never reaches this
+ * lookup — it fails one layer earlier and lands in `malformed`, which is the loud counter
+ * and the correct one.
+ *
+ * What reaches the branch below is only `PENDING` and `FAILED`: ordinary rows, arriving every
+ * day, correctly filed as not-money. Instrumenting them as drift would alarm on the routine.
+ */
+
 export type Normalized =
   | { readonly ok: true; readonly line: SettlementLine }
-  | { readonly ok: false; readonly rejected: RejectedRow };
+  /**
+   * `drift` is present when the row was refused because a *vocabulary* did not match, as
+   * opposed to because the row said something we understood and declined.
+   *
+   * A USD row is a currency we knowingly do not keep books in; an entry type of `DR` where
+   * `debit` was expected is a word nobody has taught us. Both are refusals, both produce an
+   * identical-looking `RejectedRow`, and only the second means the format moved. Carried
+   * here because the row functions stay pure — they report what they saw and the fold
+   * records it.
+   */
+  | { readonly ok: false; readonly rejected: RejectedRow; readonly drift?: DriftNote };
 
 /**
  * Map one normalised provider transaction onto a canonical settlement line.
@@ -100,7 +125,9 @@ export function toPayout(
   adjustments: readonly SettlementAdjustment[],
   evidenceId: string,
   lineage: RowLineage,
-): { ok: true; payout: Payout } | { ok: false; rejected: RejectedRow } {
+):
+  | { ok: true; payout: Payout }
+  | { ok: false; rejected: RejectedRow; drift?: DriftNote } {
   const raw = txn.rawProviderPayload;
 
   if (txn.currency !== 'NGN') {
@@ -159,10 +186,16 @@ export function fromParseResults(
   interpret: (txn: StandardizedTransaction) => RowInterpretation,
   context: SettlementContext,
   root = '$',
+  watch: DriftWatch = new DriftWatch(source, format),
 ): SettlementIngestResult {
   const payouts: Payout[] = [];
   const lines: SettlementLine[] = [];
   const rejected: RejectedRow[] = [];
+
+  // Counted before anything is interpreted, and counted whether a row survives or not. This
+  // is the denominator every severity judgement rests on, and taking it from the rows that
+  // *parsed* would report a file where nothing parsed as a file with nothing wrong with it.
+  watch.countRows(rows.length);
 
   // The index is the row's position in the artifact as parsed, and it is carried whether
   // the row survives or not. "Which file?" was always answerable; "which line of it?" is
@@ -172,6 +205,7 @@ export function fromParseResults(
 
     if (row.kind === 'parse_error') {
       rejected.push({ kind: 'malformed', reason: row.error.message, raw: row.raw });
+      watch.malformedRow(row.error.message, lineage);
       continue;
     }
     if (row.kind === 'unknown_event') {
@@ -180,6 +214,10 @@ export function fromParseResults(
         reason: `unrecognised record type: ${row.eventType}`,
         raw: row.raw,
       });
+      // A record type the connector does not know is the same class of news as a status it
+      // does not know, and it arrives through a different door. Both are the format having
+      // moved; only this one was ever visible, and only as a number nobody watched.
+      watch.unknownValue('record_type', row.eventType, lineage);
       continue;
     }
 
@@ -193,7 +231,10 @@ export function fromParseResults(
         lineage,
       );
       if (result.ok) payouts.push(result.payout);
-      else rejected.push(result.rejected);
+      else {
+        rejected.push(result.rejected);
+        if (result.drift) watch.unknownValue(result.drift.field, result.drift.value, lineage);
+      }
       continue;
     }
 
@@ -206,10 +247,23 @@ export function fromParseResults(
       interpretation.hints,
     );
     if (normalized.ok) lines.push(normalized.line);
-    else rejected.push(normalized.rejected);
+    else {
+      rejected.push(normalized.rejected);
+      if (normalized.drift) {
+        watch.unknownValue(normalized.drift.field, normalized.drift.value, lineage);
+      }
+    }
   }
 
-  return { source, format, evidence, payouts, lines, rejected };
+  return {
+    source,
+    format,
+    evidence,
+    payouts,
+    lines,
+    rejected,
+    anomalies: watch.anomalies(evidence, context.receivedAt),
+  };
 }
 
 /**

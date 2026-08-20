@@ -51,7 +51,22 @@ export const webhookRoutes: FastifyPluginCallback<Services> = (app, services, do
 
   app.post<{ Params: { source: string } }>(
     '/webhooks/:source',
-    { bodyLimit: config.limits.webhookBytes },
+    {
+      bodyLimit: config.limits.webhookBytes,
+      // Documentation only. No `body` schema: this route's body is a Buffer by design, and a
+      // validator here would reject the raw bytes the signature is computed over.
+      schema: {
+        tags: ['Webhooks'],
+        operationId: 'acceptWebhook',
+        summary: 'Accept a provider delivery',
+        description:
+          'Verifies the signature over the raw bytes, refuses card data, and writes the ' +
+          'delivery down. It does not normalise the payload, post to the ledger, match ' +
+          'anything or send a notification — a worker does all of that later, from the row ' +
+          'this wrote (ADR-0050).',
+        security: [{ providerSignature: [] }],
+      },
+    },
     async (request, reply) => {
       const source = request.params.source;
 

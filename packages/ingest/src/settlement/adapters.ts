@@ -7,8 +7,9 @@ import { PROVIDER as MONNIFY, parseMonnifyTransaction } from '@pay-normalize/mon
 import { PROVIDER as NOMBA, parseNombaTransactionRecord } from '@pay-normalize/nomba';
 
 import type { AdjustmentKind, SettlementAdjustment } from '@recon/canon';
-import { money } from '@recon/canon';
+import { arrayLineage, money } from '@recon/canon';
 
+import { DriftWatch, asRecord, unreadFields, type FieldSet } from '../drift.js';
 import { evidenceOf } from '../evidence.js';
 import { fromParseResults, parseJson, type RowInterpretation } from './normalize.js';
 import type {
@@ -16,6 +17,96 @@ import type {
   SettlementIngestResult,
   SettlementSource,
 } from './types.js';
+
+/**
+ * Every key this adapter and its connector are known to read.
+ *
+ * A maintenance obligation, deliberately. TypeScript's own knowledge of these records is
+ * erased long before the bytes arrive, so there is nothing to ask at runtime and the list has
+ * to be written down. Adding a field to the parser means adding it here; forgetting produces
+ * a spurious anomaly that somebody deletes in a minute, which is the failure worth having
+ * over the alternative.
+ *
+ * `meta` is included as read even though nothing reads inside it: it is the provider's own
+ * declared bag for things that are not part of the contract, and treating every key that
+ * appears in it as news would make this alarm on the provider's ordinary business.
+ */
+const FLUTTERWAVE_PAYOUT_FIELDS: readonly FieldSet[] = [
+  {
+    at: '',
+    fields: [
+      'id',
+      'net_amount',
+      'gross_amount',
+      'currency',
+      'meta',
+      'status',
+      'due_datetime',
+      'transaction_datetime',
+      'created_datetime',
+      'fees',
+      'destination',
+      'charge_count',
+      'chargeback',
+      'refund',
+      'reserve',
+      'reserve_release',
+    ],
+  },
+];
+
+/**
+ * Nomba's transaction record, as its connector's schema describes it.
+ *
+ * Taken from the connector's own schema rather than from a sample file, because a sample
+ * shows what one export happened to contain while the schema shows what the parser is
+ * prepared to read — and it is the second list that makes "nobody read this key" true.
+ */
+const NOMBA_RECORD_FIELDS: readonly FieldSet[] = [
+  {
+    at: '',
+    fields: [
+      'id',
+      'status',
+      'amount',
+      'fixedCharge',
+      'amountCharged',
+      'type',
+      'entryType',
+      'timeCreated',
+      'timeUpdated',
+      'timeCompleted',
+      'walletCurrency',
+      'currency',
+      'merchantTxRef',
+      'rrn',
+      'sessionId',
+    ],
+  },
+];
+
+/**
+ * Monnify's, which arrives one envelope per row.
+ *
+ * Both levels are declared. Watching only the envelope would leave the fields that actually
+ * carry the money — inside `responseBody` — unwatched, which is where a format change would
+ * do its damage.
+ */
+const MONNIFY_RECORD_FIELDS: readonly FieldSet[] = [
+  { at: '', fields: ['requestSuccessful', 'responseMessage', 'responseCode', 'responseBody'] },
+  {
+    at: 'responseBody',
+    fields: [
+      'transactionReference',
+      'amountPaid',
+      'settlementAmount',
+      'paymentStatus',
+      'paymentMethod',
+      'currency',
+      'paidOn',
+    ],
+  },
+];
 
 /**
  * Flutterwave settlements, from `GET /settlements`.
@@ -33,6 +124,7 @@ export const flutterwaveSettlements: SettlementSource = {
   source: FLUTTERWAVE,
   format: 'flutterwave-settlements-api-v4',
   parserVersion: 'flutterwave-settlements/2',
+  knownFields: FLUTTERWAVE_PAYOUT_FIELDS,
 
   ingest(payload: Buffer, context: SettlementContext): SettlementIngestResult {
     const evidence = evidenceOf(
@@ -40,9 +132,32 @@ export const flutterwaveSettlements: SettlementSource = {
       { ...context, kind: 'psp_settlement', source: this.source },
       this.parserVersion,
     );
+    const watch = new DriftWatch(this.source, this.format);
 
     const json = parseJson(payload);
-    if (!json.ok) return failed(this.source, this.format, evidence, json.rejected);
+    if (!json.ok) {
+      watch.unknownShape('payload is not JSON');
+      return failed(this.source, this.format, evidence, json.rejected, watch, context);
+    }
+
+    // Read the envelope before handing it to the parser, because the parser will simply find
+    // no rows if the container has been renamed and report an empty file — which is
+    // indistinguishable from a day on which nothing settled, and is the wrong thing to be
+    // indistinguishable from.
+    const envelope = asRecord(json.value);
+    const records = envelope && Array.isArray(envelope['data']) ? envelope['data'] : null;
+    if (!records) {
+      watch.unknownShape(
+        'no $.data array',
+        envelope ? `top-level keys: ${Object.keys(envelope).join(', ')}` : typeof json.value,
+      );
+    } else {
+      for (const [index, record] of records.entries()) {
+        for (const path of unreadFields(record, FLUTTERWAVE_PAYOUT_FIELDS, '$.data[]')) {
+          watch.unknownField(path, arrayLineage(index, '$.data'));
+        }
+      }
+    }
 
     const parsed = parseFlutterwaveSettlementList(json.value);
     return fromParseResults(
@@ -50,11 +165,12 @@ export const flutterwaveSettlements: SettlementSource = {
       this.format,
       evidence,
       parsed.rows,
-      (txn) => ({ as: 'payout', adjustments: flutterwaveDeductions(txn) }),
+      (txn) => ({ as: 'payout', adjustments: flutterwaveDeductions(txn, watch) }),
       context,
       // The rows live under the envelope's `data` array, so that is where a reader looking
       // for row 3 has to look. A locator that names the wrong container is worse than none.
       '$.data',
+      watch,
     );
   },
 };
@@ -72,6 +188,8 @@ export const nombaSettlements: SettlementSource = {
   format: 'nomba-transaction-records',
   parserVersion: 'nomba-transactions/2',
 
+  knownFields: NOMBA_RECORD_FIELDS,
+
   ingest(payload: Buffer, context: SettlementContext): SettlementIngestResult {
     return ingestRowArray(this, payload, context, parseNombaTransactionRecord);
   },
@@ -82,6 +200,8 @@ export const monnifySettlements: SettlementSource = {
   source: MONNIFY,
   format: 'monnify-transaction-records',
   parserVersion: 'monnify-transactions/2',
+
+  knownFields: MONNIFY_RECORD_FIELDS,
 
   ingest(payload: Buffer, context: SettlementContext): SettlementIngestResult {
     return ingestRowArray(this, payload, context, parseMonnifyTransaction);
@@ -110,7 +230,10 @@ const FLUTTERWAVE_FEE_KINDS: Readonly<Record<string, AdjustmentKind>> = {
   penalty: 'penalty',
 };
 
-function flutterwaveDeductions(txn: StandardizedTransaction): SettlementAdjustment[] {
+function flutterwaveDeductions(
+  txn: StandardizedTransaction,
+  watch: DriftWatch,
+): SettlementAdjustment[] {
   const raw = txn.rawProviderPayload;
   if (typeof raw !== 'object' || raw === null) return [];
   const record = raw as Record<string, unknown>;
@@ -124,8 +247,18 @@ function flutterwaveDeductions(txn: StandardizedTransaction): SettlementAdjustme
     const amount = nairaToKobo(entry.amount);
     if (amount === null || amount === 0n) continue;
 
+    const kind = FLUTTERWAVE_FEE_KINDS[label.toLowerCase()];
+    if (!kind) {
+      // The fallback below is right and stays: the money is real, so it books as a fee and
+      // keeps its label rather than being dropped. But booking it correctly is not the same
+      // as understanding it. A new deduction type absorbed into `fee` forever is a permanent
+      // small overstatement of what this source charges, arriving as a fee variance that
+      // nobody can trace back to the afternoon it started.
+      watch.unknownValue('fees[].type', label);
+    }
+
     adjustments.push({
-      kind: FLUTTERWAVE_FEE_KINDS[label.toLowerCase()] ?? 'fee',
+      kind: kind ?? 'fee',
       amount: money(amount),
       narration: label,
     });
@@ -183,16 +316,38 @@ function ingestRowArray(
     { ...context, kind: 'psp_settlement', source: adapter.source },
     adapter.parserVersion,
   );
+  const watch = new DriftWatch(adapter.source, adapter.format);
 
   const json = parseJson(payload);
-  if (!json.ok) return failed(adapter.source, adapter.format, evidence, json.rejected);
+  if (!json.ok) {
+    watch.unknownShape('payload is not JSON');
+    return failed(adapter.source, adapter.format, evidence, json.rejected, watch, context);
+  }
 
   if (!Array.isArray(json.value)) {
-    return failed(adapter.source, adapter.format, evidence, {
-      kind: 'malformed',
-      reason: `expected a JSON array of ${adapter.source} records, got ${typeof json.value}`,
-      raw: json.value,
-    });
+    // Already an error, and now also a *recorded* one. A source that starts wrapping its
+    // rows in an envelope is the single most likely format change these two adapters will
+    // ever see, and it deserves a record with a history rather than a 4xx somebody's cron
+    // job swallows.
+    watch.unknownShape(`expected a bare array, got ${typeof json.value}`);
+    return failed(
+      adapter.source,
+      adapter.format,
+      evidence,
+      {
+        kind: 'malformed',
+        reason: `expected a JSON array of ${adapter.source} records, got ${typeof json.value}`,
+        raw: json.value,
+      },
+      watch,
+      context,
+    );
+  }
+
+  for (const [index, record] of json.value.entries()) {
+    for (const path of unreadFields(record, adapter.knownFields, '$[]')) {
+      watch.unknownField(path, arrayLineage(index));
+    }
   }
 
   const asLine = (): RowInterpretation => ({
@@ -211,6 +366,7 @@ function ingestRowArray(
     context,
     // A bare array: row 3 is `$[3]`.
     '$',
+    watch,
   );
 }
 
@@ -219,6 +375,16 @@ function failed(
   format: string,
   evidence: SettlementIngestResult['evidence'],
   rejected: SettlementIngestResult['rejected'][number],
+  watch: DriftWatch,
+  context: SettlementContext,
 ): SettlementIngestResult {
-  return { source, format, evidence, payouts: [], lines: [], rejected: [rejected] };
+  return {
+    source,
+    format,
+    evidence,
+    payouts: [],
+    lines: [],
+    rejected: [rejected],
+    anomalies: watch.anomalies(evidence, context.receivedAt),
+  };
 }

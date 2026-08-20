@@ -1,7 +1,14 @@
-import type { BankStatementLine, Evidence, RowLineage, SourceId } from '@recon/canon';
+import type {
+  BankStatementLine,
+  Evidence,
+  IngestAnomaly,
+  RowLineage,
+  SourceId,
+} from '@recon/canon';
 import { arrayLineage, idempotencyKey, money } from '@recon/canon';
 import { refuseCardData } from '@recon/protect';
 
+import { DriftWatch, unreadFields, type DriftNote, type FieldSet } from './drift.js';
 import { evidenceOf, type EvidenceContext } from './evidence.js';
 import type { RejectedRow } from './settlement/types.js';
 
@@ -33,6 +40,15 @@ export interface BankStatementIngestResult {
   readonly evidence: Evidence;
   readonly lines: readonly BankStatementLine[];
   readonly rejected: readonly RejectedRow[];
+  /**
+   * Ways this statement was not the statement we expected.
+   *
+   * Bank exports are the loosest format this system touches — no stable header row, no
+   * version, and a human clicking Export in a banking portal at the other end. They are also
+   * the only evidence that can book cash (ADR-0027), so a column that moved here is worth
+   * more than a column that moved anywhere else.
+   */
+  readonly anomalies: readonly IngestAnomaly[];
 }
 
 export interface BankStatementContext extends Omit<EvidenceContext, 'kind' | 'source'> {
@@ -77,6 +93,7 @@ export function ingestBankStatement(
     BANK_PARSER_VERSION,
   );
 
+  const watch = new DriftWatch(context.bank, BANK_STATEMENT_FORMAT);
   const base = {
     bankAccountId: context.bankAccountId,
     format: BANK_STATEMENT_FORMAT,
@@ -87,6 +104,7 @@ export function ingestBankStatement(
   try {
     parsed = JSON.parse(payload.toString('utf8'));
   } catch (error) {
+    watch.unknownShape('payload is not JSON');
     return {
       ...base,
       lines: [],
@@ -97,10 +115,12 @@ export function ingestBankStatement(
           raw: payload.toString('utf8').slice(0, 200),
         },
       ],
+      anomalies: watch.anomalies(evidence, context.receivedAt),
     };
   }
 
   if (!Array.isArray(parsed)) {
+    watch.unknownShape(`expected a bare array, got ${typeof parsed}`);
     return {
       ...base,
       lines: [],
@@ -111,27 +131,59 @@ export function ingestBankStatement(
           raw: parsed,
         },
       ],
+      anomalies: watch.anomalies(evidence, context.receivedAt),
     };
   }
 
   const lines: BankStatementLine[] = [];
   const rejected: RejectedRow[] = [];
 
+  watch.countRows(parsed.length);
+
   for (const [index, raw] of (parsed as RawStatementRow[]).entries()) {
-    const line = toStatementLine(raw, context, evidence.evidenceId, arrayLineage(index));
-    if (line.ok) lines.push(line.line);
-    else rejected.push(line.rejected);
+    const lineage = arrayLineage(index);
+
+    // A column the converter added and this parser never read. On a bank statement that is
+    // the most likely drift of all: the conversion step that produces this shape lives
+    // wherever the per-bank knowledge is, and it changes when the bank's export changes,
+    // which is precisely when nobody thinks to tell the reconciler.
+    for (const path of unreadFields(raw, BANK_ROW_FIELDS, '$[]')) {
+      watch.unknownField(path, lineage);
+    }
+
+    const line = toStatementLine(raw, context, evidence.evidenceId, lineage);
+    if (line.ok) {
+      lines.push(line.line);
+      continue;
+    }
+    rejected.push(line.rejected);
+    if (line.drift) watch.unknownValue(line.drift.field, line.drift.value, lineage);
+    else watch.malformedRow(line.rejected.reason, lineage);
   }
 
-  return { ...base, lines, rejected };
+  return { ...base, lines, rejected, anomalies: watch.anomalies(evidence, context.receivedAt) };
 }
+
+/**
+ * The columns this parser reads.
+ *
+ * Short, because the canonical statement shape is deliberately small — the per-bank variety
+ * is absorbed by whoever converts into it. That is what makes an unread key here meaningful:
+ * anything outside this list is something the converter thought worth sending and this parser
+ * has been silently discarding.
+ */
+const BANK_ROW_FIELDS: readonly FieldSet[] = [
+  { at: '', fields: ['id', 'date', 'amount', 'type', 'narration', 'balance', 'reference'] },
+];
 
 function toStatementLine(
   raw: RawStatementRow,
   context: BankStatementContext,
   evidenceId: string,
   lineage: RowLineage,
-): { ok: true; line: BankStatementLine } | { ok: false; rejected: RejectedRow } {
+):
+  | { ok: true; line: BankStatementLine }
+  | { ok: false; rejected: RejectedRow; drift?: DriftNote } {
   const reject = (reason: string): { ok: false; rejected: RejectedRow } => ({
     ok: false,
     rejected: { kind: 'malformed', reason, raw },
@@ -142,7 +194,18 @@ function toStatementLine(
 
   const direction =
     raw.type === 'credit' ? 'credit' : raw.type === 'debit' ? 'debit' : null;
-  if (!direction) return reject(`unrecognised entry type: ${String(raw.type)}`);
+  if (!direction) {
+    // A vocabulary, not a broken row. `DR`/`CR`, `Debit`/`Credit`, or a bank that started
+    // signing the amount instead of naming a direction are all format changes wearing the
+    // costume of a bad row — and a statement whose every row fails this check has had its
+    // direction column redefined, which is the one thing on a statement that must never be
+    // guessed at.
+    return {
+      ok: false,
+      rejected: { kind: 'malformed', reason: `unrecognised entry type: ${String(raw.type)}`, raw },
+      drift: { field: 'type', value: raw.type },
+    };
+  }
 
   const amount = nairaToKobo(raw.amount);
   if (amount === null) return reject(`unparseable amount: ${String(raw.amount)}`);

@@ -20,6 +20,7 @@
  *   evidence.ts     the documents we reasoned from, and the humans who decided
  *   matching.ts     what reconciliation concluded, and why
  *   exception.ts    a difference nobody has explained yet, and its lifecycle
+ *   anomaly.ts      drift in a foreign format, before it becomes a difference
  *   events.ts       everything that happened, in order, as one narrative
  */
 
@@ -37,4 +38,5 @@ export * from './fees.js';
 export * from './evidence.js';
 export * from './matching.js';
 export * from './exception.js';
+export * from './anomaly.js';
 export * from './events.js';

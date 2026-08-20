@@ -84,6 +84,16 @@ export {
 } from './inflow.js';
 
 export {
+  recordAnomalies,
+  clearConformed,
+  acknowledgeAnomaly,
+  resolveAnomaly,
+  openAnomalies,
+  type AnomalyOutcome,
+  type QueuedAnomaly,
+} from './anomalies.js';
+
+export {
   apportion,
   apportionDeductions,
   type AllocationBreakdown,

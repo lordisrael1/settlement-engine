@@ -80,10 +80,35 @@ hash is its identity:
 | `GET` | `/reconciliation/summary?from&to` | Matched, explained and exception counts, plus money reported and not yet banked |
 | `GET` | `/exceptions`, `/exceptions/:key` | The queue, worst first, with the candidates the matcher rejected |
 | `POST` | `/exceptions/:key/resolve` | Records a maker-checked resolution; an unapproved write-off is a 422 |
+| `GET` | `/ingest/anomalies` | Foreign formats that have moved, worst first ([ADR-0067](docs/adr/0067-format-drift-is-a-record-not-a-counter.md)) |
+| `POST` | `/ingest/anomalies/:key/acknowledge` | Take ownership of a drift; it stays owned when the next file shows it again |
+| `GET` | `/evidence/:id` | Document metadata and its access log. No grant needed — no personal data in any of it |
+| `GET` | `/evidence/:id/raw?reason` | The bytes. Needs the `evidence.raw` grant · 400 without a reason · 410 once purged on schedule |
+| `POST` | `/evidence/:id/exports` | A sealed copy. Needs `evidence.export`; an original needs a second approver |
+| `GET` | `/evidence/exports/:token` | Collect it, once. No API key — the single-use token is the credential |
+
+The full reference, including every error and what causes it, is at `/docs/`.
 
 Management endpoints require `X-API-Key`. Webhook endpoints authenticate by the provider's
 signature over the raw bytes and by nothing else, because a provider holds no credential of
 ours ([ADR-0052](docs/adr/0052-two-authentication-rails.md)).
+
+## API reference
+
+    docker compose up --build
+    open http://localhost:8080/docs/
+
+A [Scalar](https://scalar.com) reference over an OpenAPI 3.1 document, served by the service
+itself — `/docs/openapi.json` and `/docs/openapi.yaml` are the document, and the UI bundle is
+self-hosted rather than fetched from a CDN, so it renders on a machine with no route out.
+
+Paths, methods, parameters and request-body schemas are generated from the routes. Responses
+and the error catalogue are written in [apps/api/src/openapi.ts](apps/api/src/openapi.ts) and
+merged in when the document is built — deliberately *not* attached to the routes, because
+Fastify's `schema.response` is a serialiser as well as a description and `fast-json-stringify`
+drops any property the schema does not name. Documentation must not be able to reshape a
+payload that carries money. A test asserts both halves: that every served route is documented,
+and that no route compiles a response schema.
 
 ## CLI
 
@@ -130,10 +155,10 @@ Configuration arrives as environment variables; see [.env.example](.env.example)
 
     npm install
     npm run build
-    npm test                    # 99 tests; suites needing a database skip themselves
+    npm test                    # 113 tests; suites needing a database skip themselves
 
     docker compose up -d postgres
-    DATABASE_URL=postgres://recon:recon@localhost:5432/recon npm test    # 205 tests
+    DATABASE_URL=postgres://recon:recon@localhost:5432/recon npm test    # 224 tests
 
 The database suites need a real Postgres, because the invariants they assert are enforced by
 Postgres. Each suite takes its own schema, so they can run concurrently.

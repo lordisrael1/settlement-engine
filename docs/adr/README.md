@@ -76,3 +76,4 @@ New record: copy the most recent file, take the next number, and add a row below
 | 0064 | [Provider payloads are reduced to a keep-list, and the signature is not re-runnable afterwards](0064-redaction-at-the-boundary.md) | Accepted |
 | 0065 | [Evidence is split into an immutable record and an expiring body, on a schedule a command runs](0065-evidence-retention-schedule.md) | Accepted — supersedes the retention half of ADR-0033 |
 | 0066 | [Tokens and approved truncations only, and every read of a document is attributable](0066-pci-scope-and-evidence-access.md) | Accepted — supersedes the operator-identity half of ADR-0052 |
+| 0067 | [Format drift is a keyed record with a lifecycle, not a counter in a response](0067-format-drift-is-a-record-not-a-counter.md) | Accepted |

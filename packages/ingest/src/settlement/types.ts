@@ -1,5 +1,6 @@
-import type { Evidence, Payout, SettlementLine, SourceId } from '@recon/canon';
+import type { Evidence, IngestAnomaly, Payout, SettlementLine, SourceId } from '@recon/canon';
 
+import type { FieldSet } from '../drift.js';
 import type { EvidenceContext } from '../evidence.js';
 
 /**
@@ -18,6 +19,13 @@ export interface RejectedRow {
    * The distinction matters operationally: a rising `malformed` count means the
    * provider changed their format and an adapter needs updating; a rising
    * `not-a-settlement` count is usually just business as usual.
+   *
+   * Both halves of that were true and neither was ever *watched*, which is what `anomalies`
+   * below is for. Two things go wrong with counters alone. They are computed per file and
+   * discarded with the response, so nothing accumulates and nothing can say "this began on
+   * Tuesday". And `not-a-settlement` really does hold one case that is not business as usual
+   * — a record type the connector has never seen — filed beside the ordinary pending rows
+   * that arrive in their thousands. A count cannot separate those; a keyed record can.
    */
   readonly kind: 'malformed' | 'not-a-settlement';
   readonly reason: string;
@@ -46,6 +54,17 @@ export interface SettlementIngestResult {
   readonly payouts: readonly Payout[];
   readonly lines: readonly SettlementLine[];
   readonly rejected: readonly RejectedRow[];
+  /**
+   * Ways this file was not the file we expected.
+   *
+   * Separate from `rejected`, and the separation is the point. A rejected row is a statement
+   * about *that row*; an anomaly is a statement about the **format**, aggregated across the
+   * whole file and keyed so that the same drift seen next week is the same record. The
+   * counters above could say "thirty-eight rows were malformed" but never "this file grew a
+   * `settlement_fee` column three weeks ago and has been growing it since", which is the
+   * sentence somebody can act on.
+   */
+  readonly anomalies: readonly IngestAnomaly[];
 }
 
 /**
@@ -63,6 +82,16 @@ export interface SettlementSource {
   readonly format: string;
   /** Bumped whenever the parsing changes. Recorded with every record it produces. */
   readonly parserVersion: string;
+  /**
+   * Every key this adapter and its connector read, declared so that the ones they do not
+   * can be noticed.
+   *
+   * Part of the contract rather than a private detail of each adapter, because it is the
+   * thing that has to be updated in the same commit as a parsing change. A field added to
+   * `ingest` and not added here reports itself as drift on the next file, which is a loud
+   * and cheap way to be reminded.
+   */
+  readonly knownFields: readonly FieldSet[];
   ingest(payload: Buffer, context: SettlementContext): SettlementIngestResult;
 }
 

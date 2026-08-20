@@ -6,15 +6,17 @@ import { deliveryAt } from '@recon/inbox';
 import { allBalances } from '@recon/ledger-core';
 import { buildPolicy } from '@recon/policy';
 import {
+  acknowledgeAnomaly,
   exceptionAt,
   exceptionHistory,
+  openAnomalies,
   openExceptions,
   reconcile,
   resolveException,
   summarize,
 } from '@recon/reconciler';
 
-import { requireApiKey } from '../auth.js';
+import { principalOf, requireApiKey } from '../auth.js';
 import {
   asBalances,
   asDelivery,
@@ -46,7 +48,11 @@ export const managementRoutes: FastifyPluginCallback<Services> = (app, services,
   app.addHook('onRequest', requireApiKey(config));
 
   // ── What the books say ────────────────────────────────────────────────────
-  app.get('/balances', async () => ({ balances: asBalances(await allBalances(pool)) }));
+  app.get(
+    '/balances',
+    { schema: { tags: ['Reconciliation'], operationId: 'balances', summary: 'Current balances' } },
+    async () => ({ balances: asBalances(await allBalances(pool)) }),
+  );
 
   // ── What happened to a webhook we accepted ────────────────────────────────
   //
@@ -56,6 +62,13 @@ export const managementRoutes: FastifyPluginCallback<Services> = (app, services,
   // failed — the error that stopped it.
   app.get<{ Params: { deliveryId: string } }>(
     '/deliveries/:deliveryId',
+    {
+      schema: {
+        tags: ['Webhooks'],
+        operationId: 'delivery',
+        summary: 'What became of an accepted delivery',
+      },
+    },
     async (request, reply) => {
       const delivery = await deliveryAt(pool, request.params.deliveryId);
       if (!delivery) return reply.code(404).send({ error: 'No such delivery.' });
@@ -68,18 +81,39 @@ export const managementRoutes: FastifyPluginCallback<Services> = (app, services,
   // A run is bounded by `reconcileLimit` on purpose. Subset-sum batching over an unbounded
   // set of open promises is how a matcher stops returning; the limit is the difference
   // between a run that takes a second and one that never finishes (ADR-0053).
-  app.post('/reconcile/runs', async (_request, reply) => {
-    const run = await reconcile(pool, {
-      asOf: now(),
-      policyFor: await buildPolicy(pool, config.merchantId),
-      limit: config.reconcileLimit,
-    });
-    return reply.code(201).send(asRun(run));
-  });
+  app.post(
+    '/reconcile/runs',
+    {
+      schema: {
+        tags: ['Reconciliation'],
+        operationId: 'reconcile',
+        summary: 'Run the matcher',
+        description:
+          'Allocation, then bank confirmation. Kept separate from the uploads so a statement ' +
+          'can land at 04:00 and be reconciled at 09:00 against three PSP reports that arrived ' +
+          'in between — rather than three times, once per upload.',
+      },
+    },
+    async (_request, reply) => {
+      const run = await reconcile(pool, {
+        asOf: now(),
+        policyFor: await buildPolicy(pool, config.merchantId),
+        limit: config.reconcileLimit,
+      });
+      return reply.code(201).send(asRun(run));
+    },
+  );
 
   // ── What it all added up to ───────────────────────────────────────────────
   app.get<{ Querystring: { from?: string; to?: string } }>(
     '/reconciliation/summary',
+    {
+      schema: {
+        tags: ['Reconciliation'],
+        operationId: 'summary',
+        summary: 'What it all added up to',
+      },
+    },
     async (request, reply) => {
       const to = request.query.to ? date(request.query.to) : now();
       const from = request.query.from ? date(request.query.from) : null;
@@ -93,7 +127,10 @@ export const managementRoutes: FastifyPluginCallback<Services> = (app, services,
   // ── The queue ─────────────────────────────────────────────────────────────
   app.get<{
     Querystring: { state?: string | string[]; subject?: string; limit?: string };
-  }>('/exceptions', async (request, reply) => {
+  }>(
+    '/exceptions',
+    { schema: { tags: ['Exceptions'], operationId: 'exceptions', summary: 'The queue, worst first' } },
+    async (request, reply) => {
     const states = list(request.query.state) as ExceptionState[];
     const limit = request.query.limit ? Number(request.query.limit) : 100;
     if (!Number.isInteger(limit) || limit <= 0 || limit > 1000) {
@@ -110,10 +147,103 @@ export const managementRoutes: FastifyPluginCallback<Services> = (app, services,
 
     // Worst first, as the package ordered it. Re-sorting here would be this layer having an
     // opinion about severity, which is exactly what it must not have.
-    return { exceptions: items.map(asException) };
+      return { exceptions: items.map(asException) };
+    },
+  );
+
+  /**
+   * The drift queue: foreign formats that have moved, worst first.
+   *
+   * Deliberately a separate endpoint from `/exceptions` rather than a filter on it. An
+   * exception is a money difference a person can answer with a resolution; an anomaly is a
+   * statement about a parser, with no amount and nothing to resolve (ADR-0067). Two questions,
+   * two lists — and the person who reads one in the morning is often not the person who reads
+   * the other.
+   */
+  app.get<{ Querystring: { limit?: string } }>(
+    '/ingest/anomalies',
+    {
+      schema: {
+        tags: ['Ingest'],
+        operationId: 'anomalies',
+        summary: 'The drift queue',
+        description:
+          'Foreign formats that have moved, worst first. An unknown field is the earliest ' +
+          'warning available and arrives while everything still works.',
+      },
+    },
+    async (request, reply) => {
+    const limit = request.query.limit ? Number(request.query.limit) : 100;
+    if (!Number.isInteger(limit) || limit <= 0 || limit > 1000) {
+      return reply.code(400).send({ error: '`limit` must be an integer between 1 and 1000.' });
+    }
+
+    const items = await openAnomalies(pool, limit);
+    return {
+      anomalies: items.map((item) => ({
+        key: item.key,
+        source: item.source,
+        kind: item.kind,
+        detail: item.detail,
+        state: item.state,
+        severity: item.severity,
+        since: item.since,
+        // The two dates that turn an anomaly into a diagnosis. A field that first appeared on
+        // the day the fee variances started is an explanation; the newest observation alone
+        // could never say so.
+        firstSeen: item.firstSeen,
+        lastSeen: item.lastSeen,
+        filesAffected: item.filesAffected,
+        timesRaised: item.timesRaised,
+        occurrences: item.occurrences,
+        rowsInFile: item.rowsInFile,
+        share: item.share,
+        evidenceId: item.evidenceId,
+        parserVersion: item.parserVersion,
+        format: item.format,
+        firstPath: item.firstPath,
+        sample: item.sample,
+      })),
+    };
   });
 
-  app.get<{ Params: { key: string } }>('/exceptions/:key', async (request, reply) => {
+  app.post<{ Params: { key: string }; Body: { actor?: string; note?: string } }>(
+    '/ingest/anomalies/:key/acknowledge',
+    {
+      schema: {
+        tags: ['Ingest'],
+        operationId: 'acknowledgeAnomaly',
+        summary: 'Take ownership of a drift',
+      },
+    },
+    async (request, reply) => {
+      const actor = request.body?.actor ?? principalOf(request).name;
+      const took = await acknowledgeAnomaly(
+        pool,
+        request.params.key,
+        actor,
+        now(),
+        request.body?.note ?? null,
+      );
+      if (!took) {
+        return reply
+          .code(409)
+          .send({ error: 'No such anomaly, or it is not in a state that can be acknowledged.' });
+      }
+      return { acknowledged: request.params.key, by: actor };
+    },
+  );
+
+  app.get<{ Params: { key: string } }>(
+    '/exceptions/:key',
+    {
+      schema: {
+        tags: ['Exceptions'],
+        operationId: 'exception',
+        summary: 'One exception, with its whole history',
+      },
+    },
+    async (request, reply) => {
     const item = await exceptionAt(pool, request.params.key);
     if (!item) return reply.code(404).send({ error: 'No such exception.' });
     return {
@@ -121,13 +251,25 @@ export const managementRoutes: FastifyPluginCallback<Services> = (app, services,
       // Nothing here was ever overwritten, so the history is the whole story: raised on
       // Tuesday, acknowledged by a named person on Wednesday, resolved by evidence on
       // Thursday (ADR-0043).
-      history: await exceptionHistory(pool, request.params.key),
-    };
-  });
+        history: await exceptionHistory(pool, request.params.key),
+      };
+    },
+  );
 
   app.post<{ Params: { key: string }; Body: ResolveBody }>(
     '/exceptions/:key/resolve',
-    { schema: { body: RESOLVE_SCHEMA } },
+    {
+      schema: {
+        body: RESOLVE_SCHEMA,
+        tags: ['Exceptions'],
+        operationId: 'resolveException',
+        summary: 'Answer an exception',
+        description:
+          'Three writes in one transaction: the decision, the compensating entry, and the ' +
+          'closing of the queue item. `resolutionKey` is supplied by the caller, not ' +
+          'generated, so a retried request appends one resolution rather than two.',
+      },
+    },
     async (request, reply) => {
       const item = await exceptionAt(pool, request.params.key);
       if (!item) return reply.code(404).send({ error: 'No such exception.' });

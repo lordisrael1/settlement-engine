@@ -48,6 +48,14 @@ export const evidenceRoutes: FastifyPluginCallback<Services> = (app, services, d
   // was exported from, which is very nearly the opposite of what an export is for.
   app.get<{ Params: { token: string } }>(
     '/evidence/exports/:token',
+    {
+      schema: {
+        tags: ['Evidence'],
+        operationId: 'collectExport',
+        summary: 'Collect a sealed export, once',
+        security: [{ exportToken: [] }],
+      },
+    },
     async (request, reply) => {
       const claim = await claimExport(pool, request.params.token, now());
 
@@ -109,7 +117,17 @@ export const evidenceRoutes: FastifyPluginCallback<Services> = (app, services, d
     // The cheap, ordinary case, and the one that answers most audit questions: which file,
     // who uploaded it, when, which parser version read it, and whether its bytes are still
     // here. No grant, because there is no personal data in any of it.
-    scope.get<{ Params: { id: string } }>('/evidence/:id', async (request, reply) => {
+    scope.get<{ Params: { id: string } }>(
+      '/evidence/:id',
+      {
+        schema: {
+          tags: ['Evidence'],
+          operationId: 'evidence',
+          summary: 'Document metadata and its access log',
+          description: 'No grant required: there is no personal data in any of it.',
+        },
+      },
+      async (request, reply) => {
       const record = await evidenceAt(pool, request.params.id);
       if (!record) return reply.code(404).send({ error: 'No such evidence.' });
 
@@ -143,9 +161,10 @@ export const evidenceRoutes: FastifyPluginCallback<Services> = (app, services, d
           reason: entry.reason,
           approvedBy: entry.approvedBy,
           at: entry.at.toISOString(),
-        })),
-      };
-    });
+          })),
+        };
+      },
+    );
 
     // ── The bytes ─────────────────────────────────────────────────────────────
     //
@@ -155,7 +174,18 @@ export const evidenceRoutes: FastifyPluginCallback<Services> = (app, services, d
     // been none of those things.
     scope.get<{ Params: { id: string }; Querystring: { reason?: string } }>(
       '/evidence/:id/raw',
-      { onRequest: requireGrant('evidence.raw') },
+      {
+        onRequest: requireGrant('evidence.raw'),
+        schema: {
+          tags: ['Evidence'],
+          operationId: 'evidenceRaw',
+          summary: 'The bytes of a document',
+          description:
+            'Its own endpoint rather than a field on the metadata response, which is the whole ' +
+            'point: a separate route is separately authorised, separately logged, and ' +
+            'separately rate-limited. A `?include=raw` parameter would have been none of those.',
+        },
+      },
       async (request, reply) => {
         const reason = (request.query.reason ?? '').trim();
         if (reason === '') {
@@ -210,7 +240,19 @@ export const evidenceRoutes: FastifyPluginCallback<Services> = (app, services, d
     // diverges.
     scope.post<{ Params: { id: string }; Body: ExportBody }>(
       '/evidence/:id/exports',
-      { onRequest: requireGrant('evidence.export'), schema: { body: EXPORT_SCHEMA } },
+      {
+        onRequest: requireGrant('evidence.export'),
+        schema: {
+          body: EXPORT_SCHEMA,
+          tags: ['Evidence'],
+          operationId: 'issueExport',
+          summary: 'Take a copy out of the system',
+          description:
+            'Redacted by default. The original needs a second named approver — the same policy ' +
+            'a write-off is measured against (ADR-0042), extended rather than duplicated, ' +
+            'because two controls with two thresholds is one control that quietly diverges.',
+        },
+      },
       async (request, reply) => {
         const principal = principalOf(request);
         const at = now();
