@@ -12,16 +12,19 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc --build"
   },
   "dependencies": {
-    "@recon/canon": "0.0.0",
     "@pay-normalize/core": "^0.1.2",
     "@pay-normalize/flutterwave": "^0.1.2",
     "@pay-normalize/monnify": "^0.1.2",
     "@pay-normalize/nomba": "^0.1.2",
-    "@pay-normalize/paystack": "^0.1.4"
+    "@pay-normalize/paystack": "^0.1.4",
+    "@recon/canon": "0.0.0",
+    "@recon/protect": "0.0.0"
   }
 }

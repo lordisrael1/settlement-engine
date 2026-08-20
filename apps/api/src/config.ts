@@ -1,4 +1,8 @@
 import type { MerchantId, SourceId } from '@recon/canon';
+import { keyRingFromEnv, retentionFromEnv } from '@recon/protect';
+import type { EvidenceVault } from '@recon/reconciler';
+
+import { Principals } from './principals.js';
 
 /**
  * Everything the service needs to know that is not in the code.
@@ -13,10 +17,28 @@ export interface Config {
   readonly port: number;
 
   /**
-   * The management credential. Webhooks do **not** use it — a PSP has no key of ours and
-   * authenticates by signing the bytes it sends (ADR-0052).
+   * Who may call the management endpoints, and what each of them may do.
+   *
+   * Webhooks do **not** use this — a PSP has no key of ours and authenticates by signing
+   * the bytes it sends (ADR-0052). Per principal rather than one shared key, because the
+   * evidence endpoints record who read what and a shared key makes that record say "api"
+   * (ADR-0066).
    */
-  readonly apiKey: string;
+  readonly principals: Principals;
+
+  /**
+   * Where evidence keys come from, and how long each version of a document is kept.
+   *
+   * Read at startup and passed down, so a route never reaches for ambient state and a test
+   * can run two schedules in one process (ADR-0063).
+   */
+  readonly vault: EvidenceVault;
+
+  /**
+   * How long an export link lives. Minutes, not days: a download link valid for a week is a
+   * download link somebody forwards.
+   */
+  readonly exportTtlMs: number;
 
   /** Whose books these are. Fee contracts are negotiated per merchant. */
   readonly merchantId: MerchantId;
@@ -61,27 +83,32 @@ export class ConfigurationError extends Error {
 }
 
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): Config {
-  const apiKey = env['RECON_API_KEY'];
-  if (!apiKey) {
-    // Refusing to start is the point. A service that quietly serves balances and books
-    // resolutions with no credential because a variable was missing is worse than one that
-    // does not come up, and the second failure is the one somebody notices.
+  if (env['RECON_API_KEY']) {
+    // Not a fallback. One shared key cannot tell two operators apart, and the evidence
+    // endpoints record who read what — so a deployment still setting the old variable is a
+    // deployment whose access log would be a list of the word "api". Refusing to start with
+    // the replacement named is the shortest path to it being set correctly.
     throw new ConfigurationError(
-      'RECON_API_KEY is not set. The management endpoints expose balances, ingestion and ' +
-        'the resolution path; there is deliberately no way to run them unauthenticated.',
+      'RECON_API_KEY is set and is no longer read. Keys now belong to named principals, ' +
+        'because an audit record naming an operator who named themselves answers "what did ' +
+        'somebody type?" rather than "who did this?" (ADR-0066). Replace it with ' +
+        'RECON_API_KEYS, a comma-separated list of "principal:secret:grant|grant".',
     );
   }
-  if (apiKey.length < 16) {
-    throw new ConfigurationError(
-      `RECON_API_KEY is ${apiKey.length} characters. A key short enough to guess is a key ` +
-        `that will be; use at least 16.`,
-    );
-  }
+
+  // Refusing to start is the point. A service that quietly serves balances and books
+  // resolutions with no credential because a variable was missing is worse than one that
+  // does not come up, and the second failure is the one somebody notices.
+  const principals = Principals.fromEnv(env['RECON_API_KEYS']);
 
   return {
     host: env['RECON_HOST'] ?? '0.0.0.0',
     port: number(env, 'PORT', 8080),
-    apiKey,
+    principals,
+    // Throws when no key is configured. Evidence is encrypted before it is stored and there
+    // is deliberately no unencrypted path, so there is nothing sensible to do without one.
+    vault: { keyRing: keyRingFromEnv(env), retention: retentionFromEnv(env) },
+    exportTtlMs: number(env, 'RECON_EXPORT_TTL_MS', 15 * 60 * 1000),
     merchantId: env['RECON_MERCHANT'] ?? 'default-merchant',
     bankAccountId: env['RECON_BANK_ACCOUNT'] ?? 'primary',
     bank: env['RECON_BANK'] ?? 'bank',

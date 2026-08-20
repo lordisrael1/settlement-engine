@@ -4,7 +4,8 @@ Date: 2026-08-18
 
 ## Status
 
-Accepted
+Accepted — the operator-identity half superseded by
+[ADR-0066](0066-pci-scope-and-evidence-access.md)
 
 ## Context
 

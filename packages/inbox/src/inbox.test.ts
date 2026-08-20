@@ -12,8 +12,11 @@ import {
   deliveryId,
   drain,
   inboxDepth,
+  inboxOriginals,
+  redactInboxOriginals,
   INBOX_MIGRATIONS_DIR,
   type DeliveryHandler,
+  type Redactor,
 } from './inbox.js';
 
 /**
@@ -260,5 +263,107 @@ describe('the webhook inbox', { skip: DATABASE_URL ? false : 'set DATABASE_URL t
 
     assert.equal(a.claimed + b.claimed, 6);
     assert.equal(new Set(worked).size, 6);
+  });
+  // ── Redaction ─────────────────────────────────────────────────────────────
+  //
+  // The claims here are about *when* the original stops existing, which is a claim about a
+  // transaction boundary and therefore only checkable against a real database.
+
+  /** A stand-in for the keep-list: everything but the reference goes. */
+  const keepReference: Redactor = (delivery) => {
+    const body = JSON.parse(delivery.rawBody.toString('utf8')) as { reference?: string };
+    return {
+      bytes: Buffer.from(JSON.stringify({ reference: body.reference }), 'utf8'),
+      dropped: 3,
+    };
+  };
+
+  const rawOf = async (id: string): Promise<{ raw: string; content: string; at: Date | null }> => {
+    const result = await pool.query<{ raw: Buffer; content: string; redacted_at: Date | null }>(
+      'SELECT raw, content, redacted_at FROM webhook_inbox WHERE delivery_id = $1',
+      [id],
+    );
+    const row = result.rows[0]!;
+    return { raw: row.raw.toString('utf8'), content: row.content, at: row.redacted_at };
+  };
+
+  test('a worked delivery keeps its meaning and loses the customer', async () => {
+    const source = scenario();
+    const body = Buffer.from(
+      JSON.stringify({ reference: 'PSK_1', email: 'amaka@example.com', ip: '102.89.34.11' }),
+      'utf8',
+    );
+    const accepted = await accept(pool, { source, headers: {}, rawBody: body, receivedAt: AT });
+
+    await drain(pool, booked('txn:1'), { at: AT, limit: 1, redact: keepReference });
+
+    const stored = await rawOf(accepted.deliveryId);
+    assert.equal(stored.content, 'redacted');
+    assert.equal(stored.at?.getTime(), AT.getTime());
+    assert.ok(!stored.raw.includes('amaka@example.com'));
+    assert.ok(stored.raw.includes('PSK_1'));
+
+    // The delivery id is unchanged and still names the original bytes. It is the hash of
+    // what arrived, and what arrived did arrive — the payload is gone, not the fact of it.
+    assert.equal(accepted.deliveryId, deliveryId(source, body));
+    const delivery = await deliveryAt(pool, accepted.deliveryId);
+    assert.equal(delivery?.state, 'processed');
+  });
+
+  test('a delivery that threw keeps its bytes, because it will be verified again', async () => {
+    const source = scenario();
+    const accepted = await accept(pool, {
+      source,
+      headers: {},
+      rawBody: Buffer.from(JSON.stringify({ reference: 'PSK_2', email: 'tunde@example.com' }), 'utf8'),
+      receivedAt: AT,
+    });
+
+    const throwing: DeliveryHandler = async () => {
+      throw new Error('the ledger is unreachable');
+    };
+    await drain(pool, throwing, { at: AT, limit: 1, maxAttempts: 5, redact: keepReference });
+
+    // Redacting here would leave a pending delivery whose signature can never be checked
+    // again — the drain re-verifies on every attempt.
+    const stored = await rawOf(accepted.deliveryId);
+    assert.equal(stored.content, 'original');
+    assert.ok(stored.raw.includes('tunde@example.com'));
+  });
+
+  test('the sweep catches what the drain will never work', async () => {
+    const source = scenario();
+    const old = new Date(AT.getTime() - 60 * 24 * 60 * 60 * 1000);
+    const accepted = await accept(pool, {
+      source,
+      headers: {},
+      rawBody: Buffer.from(JSON.stringify({ reference: 'PSK_3', email: 'ngozi@example.com' }), 'utf8'),
+      receivedAt: old,
+    });
+
+    const before = await inboxOriginals(pool);
+    assert.ok(before.originals >= 1);
+
+    const swept = await redactInboxOriginals(pool, {
+      before: new Date(AT.getTime() - 30 * 24 * 60 * 60 * 1000),
+      at: AT,
+      redact: keepReference,
+    });
+
+    assert.ok(swept.redacted >= 1);
+    const stored = await rawOf(accepted.deliveryId);
+    assert.equal(stored.content, 'redacted');
+    assert.ok(!stored.raw.includes('ngozi@example.com'));
+  });
+
+  test('a redaction already done is not done again', async () => {
+    // The sweep is a cron job, and a cron job runs. Its query selects on content, so a
+    // second pass over an already-redacted inbox finds nothing rather than re-writing rows.
+    const swept = await redactInboxOriginals(pool, {
+      before: new Date(AT.getTime() - 30 * 24 * 60 * 60 * 1000),
+      at: AT,
+      redact: keepReference,
+    });
+    assert.equal(swept.redacted, 0);
   });
 });

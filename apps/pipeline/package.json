@@ -11,9 +11,11 @@
   },
   "dependencies": {
     "@recon/canon": "0.0.0",
+    "@recon/inbox": "0.0.0",
     "@recon/ingest": "0.0.0",
     "@recon/ledger-core": "0.0.0",
     "@recon/policy": "0.0.0",
+    "@recon/protect": "0.0.0",
     "@recon/reconciler": "0.0.0",
     "@recon/simulator": "0.0.0",
     "pg": "^8.16.3"

@@ -4,6 +4,8 @@ import { after, before, describe, test } from 'node:test';
 
 import type { Pool } from 'pg';
 
+import { localKeyRing, parseLocalKey } from '@recon/protect';
+
 import type {
   AccountId,
   BankStatementLine,
@@ -14,7 +16,7 @@ import type {
   Payout,
   SettlementAdjustment,
 } from '@recon/canon';
-import { ANY_CHANNEL, feeFor, feeModel, money, NO_LINEAGE } from '@recon/canon';
+import { ANY_CHANNEL, feeFor, feeModel, money, NO_LINEAGE, DEFAULT_RETENTION } from '@recon/canon';
 import {
   bookAuthorizedPayment,
   createPool,
@@ -32,13 +34,23 @@ import {
   loadFeeContracts,
   matchOf,
   recordBankLines,
-  recordEvidence,
   recordPayouts,
   recordResolution,
   resolutionsFor,
   RECONCILER_MIGRATIONS_DIR,
   saveFeeContract,
 } from './store.js';
+
+import { readEvidenceBytes, recordEvidence, type EvidenceVault } from './evidence.js';
+
+/**
+ * A key ring for the suite. Evidence is encrypted on the way in with no unencrypted path
+ * (ADR-0063), so a test that stores a document needs one exactly as a deployment does.
+ */
+const VAULT: EvidenceVault = {
+  keyRing: localKeyRing([parseLocalKey(`test:${Buffer.alloc(32, 1).toString('base64')}`)], 'test'),
+  retention: DEFAULT_RETENTION,
+};
 
 /**
  * The three-way claim, against a real Postgres — because the things being asserted are
@@ -217,7 +229,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
     await promise(source, id('pay-1'), 600_000n);
     await promise(source, id('pay-2'), 400_000n);
 
-    await recordEvidence(pool, evidence(id('ev-psp'), 'psp_settlement', source), Buffer.from('{}'));
+    await recordEvidence(pool, evidence(id('ev-psp'), 'psp_settlement', source), Buffer.from('{}'), VAULT);
     await recordPayouts(pool, [
       payout(
         source,
@@ -244,7 +256,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
     assert.equal((await getTransaction(pool, id('pay-1')))?.state, 'authorized');
 
     // ── Stage three ───────────────────────────────────────────────────────
-    await recordEvidence(pool, evidence(id('ev-bank'), 'bank_statement', source), Buffer.from('[]'));
+    await recordEvidence(pool, evidence(id('ev-bank'), 'bank_statement', source), Buffer.from('[]'), VAULT);
     await recordBankLines(pool, [
       credit(id('bank-1'), 943_875n, `TRF SETTLEMENT ${id('PO-2026-0001')}`, id('ev-bank')),
     ]);
@@ -289,7 +301,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
 
     await promise(source, id('pay-1'), 600_000n);
     await promise(source, id('pay-2'), 400_000n);
-    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null);
+    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null, VAULT);
     await recordPayouts(pool, [
       payout(source, id('PO-2026-0002'), 1_000_000n, [deduction('fee', 15_000n)], id('ev')),
     ]);
@@ -315,7 +327,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
     const { source, id, policy } = scenario();
 
     await promise(source, id('pay-1'), 1_000_000n);
-    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null);
+    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null, VAULT);
     await recordPayouts(pool, [
       payout(source, id('PO-2026-0003'), 1_000_000n, [], id('ev')),
     ]);
@@ -355,7 +367,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
     // earlier tests share this schema, and a credit that fits two of them equally well is
     // refused — correctly, but it would make this test about the wrong thing.
     await promise(source, id('pay-1'), 1_200_000n);
-    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null);
+    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null, VAULT);
     await recordPayouts(pool, [
       payout(source, id('PO-2026-0004'), 1_200_000n, [deduction('fee', 18_000n)], id('ev')),
     ]);
@@ -380,7 +392,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
 
     await promise(source, id('pay-1'), 1_500_000n);
     await promise(source, id('pay-2'), 700_000n);
-    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null);
+    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null, VAULT);
     await recordPayouts(pool, [
       payout(source, id('PO-2026-0005'), 1_500_000n, [deduction('fee', 22_500n)], id('ev')),
       payout(source, id('PO-2026-0006'), 700_000n, [deduction('fee', 10_500n)], id('ev')),
@@ -407,31 +419,46 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
    * revised afterwards. Without this, "the system matched it" is the only answer available
    * six months later, and it is not an answer.
    */
-  test('evidence is stored with its bytes and cannot be rewritten', async () => {
+  test('evidence is stored with its bytes, encrypted, and cannot be rewritten', async () => {
     const { source, id } = scenario();
-    const bytes = Buffer.from('{"settlements":[]}', 'utf8');
+    const bytes = Buffer.from('{"settlements":[],"payer":"amaka@example.com"}', 'utf8');
 
     assert.deepEqual(
-      await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), bytes),
+      await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), bytes, VAULT),
       { stored: 1, duplicates: 0 },
     );
     // Content-addressed: the same file twice is one record, with no remembering involved.
     assert.deepEqual(
-      await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), bytes),
+      await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), bytes, VAULT),
       { stored: 0, duplicates: 1 },
     );
 
-    const stored = await pool.query<{ raw: Buffer; parser_version: string; received_from: string }>(
-      'SELECT raw, parser_version, received_from FROM evidence WHERE evidence_id = $1',
+    const stored = await pool.query<{ parser_version: string; received_from: string }>(
+      'SELECT parser_version, received_from FROM evidence WHERE evidence_id = $1',
       [id('ev')],
     );
-    assert.deepEqual(stored.rows[0]!.raw, bytes);
     assert.equal(stored.rows[0]!.parser_version, 'test/1');
     assert.equal(stored.rows[0]!.received_from, 'test-suite');
 
+    // The bytes come back through the key ring, and only through it. What is in the column
+    // is ciphertext: a `pg_dump`, a read replica or a leaked backup carries nothing
+    // readable, which is the exposure that actually happens (ADR-0063).
+    const column = await pool.query<{ ciphertext: Buffer; content: string }>(
+      'SELECT ciphertext, content FROM evidence_blobs WHERE evidence_id = $1',
+      [id('ev')],
+    );
+    assert.ok(!column.rows[0]!.ciphertext.includes(Buffer.from('amaka@example.com', 'utf8')));
+    assert.equal(column.rows[0]!.content, 'original');
+
+    const held = await readEvidenceBytes(pool, id('ev'), VAULT);
+    assert.deepEqual(held?.bytes, bytes);
+    assert.equal(held?.hashMatchesId, true);
+
+    // The identity, the lineage and the hash stay append-only. Only the bytes are allowed
+    // to change, and only by expiring — which is the whole of the split (ADR-0065).
     await assert.rejects(
-      pool.query('UPDATE evidence SET raw = $1 WHERE evidence_id = $2', [
-        Buffer.from('tampered'),
+      pool.query('UPDATE evidence SET parser_version = $1 WHERE evidence_id = $2', [
+        'tampered/9',
         id('ev'),
       ]),
       /LAW_2_VIOLATION/,
@@ -442,7 +469,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
     const { source, id, policy } = scenario();
 
     await promise(source, id('pay-1'), 1_000_000n);
-    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null);
+    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null, VAULT);
     await recordPayouts(pool, [
       payout(source, id('PO-2026-0007'), 1_000_000n, [deduction('fee', 15_000n)], id('ev')),
     ]);
@@ -555,7 +582,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
    */
   test('a human resolution is appended with an identity and an approver', async () => {
     const { source, id } = scenario();
-    await recordEvidence(pool, evidence(id('ev'), 'bank_statement', source), null);
+    await recordEvidence(pool, evidence(id('ev'), 'bank_statement', source), null, VAULT);
 
     await recordResolution(pool, {
       resolutionKey: id('res-1'),
@@ -809,7 +836,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
     const { source, id, policy } = scenario();
 
     await promise(source, id('pay-1'), 800_000n);
-    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null);
+    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null, VAULT);
     await recordPayouts(pool, [
       payout(source, id('PO-2026-0010'), 800_000n, [deduction('fee', 12_000n)], id('ev')),
     ]);
@@ -837,7 +864,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
 
     await promise(source, id('pay-1'), 900_000n);
     await promise(source, id('pay-2'), 2_100_000n);
-    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null);
+    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null, VAULT);
     await recordPayouts(pool, [
       payout(source, id('PO-2026-0011'), 3_000_000n, [deduction('fee', 45_000n)], id('ev')),
     ]);
@@ -867,7 +894,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
    */
   test('a record traces to a row of a file, not merely to the file', async () => {
     const { source, id } = scenario();
-    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), Buffer.from('{}'));
+    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), Buffer.from('{}'), VAULT);
     await recordPayouts(pool, [
       payout(source, id('PO-2026-0012'), 500_000n, [], id('ev')),
     ]);

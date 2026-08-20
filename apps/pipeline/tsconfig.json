@@ -12,6 +12,8 @@
     { "path": "../../packages/ingest" },
     { "path": "../../packages/reconciler" },
     { "path": "../../packages/simulator" },
-    { "path": "../../packages/policy" }
+    { "path": "../../packages/policy" },
+    { "path": "../../packages/protect" },
+    { "path": "../../packages/inbox" }
   ]
 }

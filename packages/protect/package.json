@@ -1,0 +1,25 @@
+{
+  "name": "@recon/protect",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The data-protection boundary: refuse card data, keep only what reconciliation reads, encrypt what is kept.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@recon/canon": "0.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2"
+  }
+}

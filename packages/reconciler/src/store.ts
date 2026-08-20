@@ -44,42 +44,12 @@ const kobo = (amount: Money): string => amount.kobo.toString();
 const fromKobo = (text: string | null): Money => money(BigInt(text ?? '0'));
 
 // ── Evidence ────────────────────────────────────────────────────────────────
-
-/**
- * Record the file a batch of records came from, keeping the bytes.
- *
- * Content-addressed, so re-uploading the same export is resolved by the primary key rather
- * than by remembering. `raw` is what makes a reconciliation reproducible instead of merely
- * recorded — a deployment with retention limits truncates the column later and keeps the
- * hash forever.
- */
-export async function recordEvidence(
-  db: Executor,
-  evidence: Evidence,
-  raw: Buffer | null,
-): Promise<Stored> {
-  const result = await db.query(
-    `INSERT INTO evidence
-            (evidence_id, kind, source, filename, byte_length, received_from,
-             received_at, parser_version, storage_location, raw)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-     ON CONFLICT (evidence_id) DO NOTHING`,
-    [
-      evidence.evidenceId,
-      evidence.kind,
-      evidence.source,
-      evidence.filename,
-      evidence.byteLength,
-      evidence.receivedFrom,
-      evidence.receivedAt,
-      evidence.parserVersion,
-      evidence.storageLocation,
-      raw,
-    ],
-  );
-  const stored = result.rowCount ?? 0;
-  return { stored, duplicates: 1 - stored };
-}
+//
+// `recordEvidence` and everything else about documents now lives in `evidence.ts`. It moved
+// when the bytes moved out of `evidence` and into `evidence_blobs`: what used to be one
+// insert became writing, reading, expiring and access-logging, one of which destroys things
+// and none of which is a store-a-canonical-record operation like the rest of this file
+// (ADR-0065).
 
 // ── Fee contracts ───────────────────────────────────────────────────────────
 

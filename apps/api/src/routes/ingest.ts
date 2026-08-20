@@ -8,7 +8,7 @@ import {
   recordSettlementLines,
 } from '@recon/reconciler';
 
-import { operatorOf, requireApiKey } from '../auth.js';
+import { principalOf, requireApiKey } from '../auth.js';
 import { asMoney } from '../serialise.js';
 import type { Services } from '../services.js';
 
@@ -29,6 +29,12 @@ import type { Services } from '../services.js';
  * Both are idempotent by content address: re-uploading the same export stores the evidence
  * once and reports every row as a duplicate, which is why re-sending a file after a failed
  * parse costs nothing.
+ *
+ * The bytes are encrypted on the way into `evidence_blobs` and there is no path that stores
+ * them otherwise (ADR-0063), and a file carrying a card number is refused by the ingest
+ * boundary before an evidence record exists — so there is never a row anybody has to go and
+ * delete (ADR-0066). `receivedFrom` is the verified principal now, not a name the caller
+ * supplied about itself.
  */
 export const ingestRoutes: FastifyPluginCallback<Services> = (app, services, done) => {
   const { pool, config, now } = services;
@@ -60,11 +66,11 @@ export const ingestRoutes: FastifyPluginCallback<Services> = (app, services, don
       const result = ingestSettlement(request.params.source, bytes, {
         merchantId: config.merchantId,
         filename: request.query.filename ?? null,
-        receivedFrom: operatorOf(request.headers),
+        receivedFrom: principalOf(request).name,
         receivedAt: now(),
       });
 
-      await recordEvidence(pool, result.evidence, bytes);
+      await recordEvidence(pool, result.evidence, bytes, config.vault);
       const payouts = await recordPayouts(pool, result.payouts);
       const lines = await recordSettlementLines(pool, result.lines);
 
@@ -110,11 +116,11 @@ export const ingestRoutes: FastifyPluginCallback<Services> = (app, services, don
         bankAccountId: request.query.account ?? config.bankAccountId,
         bank: request.query.bank ?? config.bank,
         filename: request.query.filename ?? null,
-        receivedFrom: operatorOf(request.headers),
+        receivedFrom: principalOf(request).name,
         receivedAt: now(),
       });
 
-      await recordEvidence(pool, result.evidence, bytes);
+      await recordEvidence(pool, result.evidence, bytes, config.vault);
       const lines = await recordBankLines(pool, result.lines);
 
       return reply.code(201).send({

@@ -103,6 +103,7 @@ The same libraries, driven from the command line:
 | `ingest-bank <file> [bank-id]` | Store a bank statement |
 | `reconcile` | Allocation, then bank confirmation |
 | `exceptions` | The queue, worst first |
+| `evidence-retention [--apply]` | Move every document to the state its retention schedule says. A dry run without `--apply`. |
 
 Every command is idempotent: running it twice moves no money. For a clean run, start from
 `docker compose down -v`.
@@ -114,7 +115,11 @@ Configuration arrives as environment variables; see [.env.example](.env.example)
 | Variable | Description |
 |---|---|
 | `DATABASE_URL` | Postgres connection string |
-| `RECON_API_KEY` | Management credential. The service refuses to start without it. |
+| `RECON_API_KEYS` | `principal:secret:grant\|grant`, comma-separated. Every key belongs to a named principal. The service refuses to start without it. |
+| `RECON_EVIDENCE_KEY` | The root key evidence is sealed under, as `<key-id>:<base64 of 32 bytes>`. Refuses to start without it. |
+| `RECON_EVIDENCE_KEYS_RETIRED` | Keys that no longer seal new records but must still unwrap old ones |
+| `RECON_RETENTION_ORIGINAL_DAYS`, `RECON_RETENTION_REDACTED_DAYS`, `RECON_RETENTION_INBOX_DAYS` | The retention schedule, in days. Defaults 30 / 2192 / 30. |
+| `RECON_EXPORT_TTL_MS` | How long an export link lives. Default 15 minutes. |
 | `RECON_WEBHOOK_SECRET_<SOURCE>` | Per-source webhook signing secret. A source without one answers 503. |
 | `RECON_MERCHANT` | Whose books these are. Fee contracts are negotiated per merchant. |
 | `RECON_BANK_ACCOUNT`, `RECON_BANK` | Which of our own accounts an upload is about when the request does not say |
@@ -125,15 +130,18 @@ Configuration arrives as environment variables; see [.env.example](.env.example)
 
     npm install
     npm run build
-    npm test                    # 79 tests; suites needing a database skip themselves
+    npm test                    # 99 tests; suites needing a database skip themselves
 
     docker compose up -d postgres
-    DATABASE_URL=postgres://recon:recon@localhost:5432/recon npm test    # 158 tests
+    DATABASE_URL=postgres://recon:recon@localhost:5432/recon npm test    # 205 tests
 
 The database suites need a real Postgres, because the invariants they assert are enforced by
 Postgres. Each suite takes its own schema, so they can run concurrently.
 
-Notable coverage: a property test asserting that across roughly 1,200 random valid
+Notable coverage: a test that feeds a synthetic PAN through the ingest boundary and asserts
+nothing is written; a test that redacts every provider fixture and asserts the canonical
+payment is unchanged, so the keep-list stays complete as connectors change; a property test
+asserting that across roughly 1,200 random valid
 transactions every cached balance equals its recomputed balance and the whole ledger sums to
 zero; a test that a settlement report books nothing while an independent bank credit books
 everything; an HTTP suite driving every endpoint through the real router via `app.inject()`;
@@ -147,6 +155,7 @@ all reach identical balances and an identical queue.
     packages/ingest        the anti-corruption boundary; no database, no I/O
     packages/reconciler    the matching engine and the exception queue
     packages/inbox         durable webhook acceptance: store, answer, work it later
+    packages/protect       refuse card data, keep only what the matcher reads, encrypt it
     packages/policy        joins ingest's calendars to the database's fee contracts
     packages/simulator     a seeded generator of provider files with planted anomalies
     apps/api               the Fastify service
@@ -173,6 +182,11 @@ Dependencies point one way only, toward `canon`. There are no cycles.
   closes itself when evidence arrives, and carries the near-misses the matcher rejected.
 - Maker-checked human resolutions that post their own compensating entries and can never
   touch `bank_account`.
+- A data-protection boundary: a delivery or upload carrying a card number or sensitive
+  authentication data is refused before it is stored; provider payloads are reduced to the
+  fields reconciliation reads in the same transaction that records what they meant; every
+  stored document is encrypted per record under a key the database has never seen; and every
+  read of a document names a verified principal in an append-only access log.
 - An append-only event log written beside the ledger, which `replay` folds from genesis to
   prove the balances can be rebuilt from it.
 - A seeded adversarial simulator that generates a messy day, declares in advance what every

@@ -1,11 +1,10 @@
-import { timingSafeEqual } from 'node:crypto';
-
-import type { onRequestHookHandler } from 'fastify';
+import type { FastifyRequest, onRequestHookHandler } from 'fastify';
 
 import type { Config } from './config.js';
+import type { Grant, Principal } from './principals.js';
 
 /**
- * The management credential: a static key in a header.
+ * The management credential: a per-principal key in a header.
  *
  * Deliberately not on the webhook route, and the asymmetry is the point (ADR-0052). A PSP
  * holds no credential of ours and never will — it proves who it is by signing the bytes it
@@ -13,25 +12,60 @@ import type { Config } from './config.js';
  * being authentic, and confusing them means either handing a shared secret to every
  * provider or accepting unsigned money movements from anyone who guessed a URL.
  *
- * Compared in constant time, because a comparison that returns early on the first wrong
- * byte tells an attacker how much of the key they have — slowly, but they have all the time
- * they want. It costs nothing to not have that property.
+ * What changed is the other half: the key now belongs to a *named principal*, and that name
+ * is what the audit record carries. One shared key with a self-declared operator header was
+ * tolerable while every audited action was a write the ledger constrained anyway; it stops
+ * being tolerable when a request can return a customer's name and email, because then the
+ * access log is the only control there is (ADR-0066).
  */
-export function requireApiKey(config: Config): onRequestHookHandler {
-  const expected = Buffer.from(config.apiKey, 'utf8');
 
+declare module 'fastify' {
+  interface FastifyRequest {
+    /** Set by `requireApiKey`. Present on every authenticated route and nowhere else. */
+    principal?: Principal;
+  }
+}
+
+export function requireApiKey(config: Config): onRequestHookHandler {
   return (request, reply, done) => {
     const presented = request.headers['x-api-key'];
-    const supplied = typeof presented === 'string' ? Buffer.from(presented, 'utf8') : null;
+    const principal = config.principals.authenticate(
+      typeof presented === 'string' ? presented : undefined,
+    );
 
-    // Length is compared first because `timingSafeEqual` throws on a mismatch — and a
-    // length difference is not a secret worth protecting: it is visible in the request.
-    const ok =
-      supplied !== null && supplied.length === expected.length && timingSafeEqual(supplied, expected);
-
-    if (!ok) {
+    if (!principal) {
+      // No detail, and no distinction between "no key" and "wrong key". The lookup is by
+      // digest of what was presented, so there is no comparison loop to leak how close a
+      // guess came, and there is no reason to say more here either.
       reply.code(401).send({
         error: 'A valid X-API-Key header is required for management endpoints.',
+      });
+      return;
+    }
+
+    request.principal = principal;
+    done();
+  };
+}
+
+/**
+ * Require a grant on top of a valid key.
+ *
+ * The separation this exists for: reading a balance and reading a provider payload are both
+ * authenticated, and only one of them hands over a customer's email. A reconciliation
+ * operator who works the exception queue all day has no reason to hold `evidence.raw`, and
+ * an audit log where everybody could have done everything narrows nothing down.
+ */
+export function requireGrant(grant: Grant): onRequestHookHandler {
+  return (request, reply, done) => {
+    const principal = request.principal;
+
+    if (!principal || !principal.grants.has(grant)) {
+      reply.code(403).send({
+        error:
+          `This endpoint needs the "${grant}" grant, which ${principal?.name ?? 'this key'} ` +
+          `does not hold. It is separate from ordinary management access because it returns ` +
+          `personal data, and the request has been recorded as refused.`,
       });
       return;
     }
@@ -41,15 +75,19 @@ export function requireApiKey(config: Config): onRequestHookHandler {
 }
 
 /**
- * Who is asking, for the audit trail.
+ * The verified principal, for a handler that has already passed `requireApiKey`.
  *
- * One static key cannot tell two operators apart, so the caller names itself and we record
- * what it said. That is weaker than an identity we verified, and it is recorded as a claim
- * rather than as a fact — but "uploaded by amaka@example.com, asserted" answers more of the
- * question an auditor asks than "uploaded by the API" does. When real identities arrive,
- * this is the one line that changes.
+ * Throws rather than defaulting. A default would be a name in an audit record that nobody
+ * authenticated, which is the exact failure this replaced — and a route that reaches this
+ * without the hook is a wiring bug, which should be loud.
  */
-export function operatorOf(headers: Record<string, string | string[] | undefined>): string {
-  const claimed = headers['x-recon-operator'];
-  return typeof claimed === 'string' && claimed.trim() !== '' ? claimed.trim() : 'api';
+export function principalOf(request: FastifyRequest): Principal {
+  const principal = request.principal;
+  if (!principal) {
+    throw new Error(
+      'principalOf() was called on a route with no authentication hook. Every route that ' +
+        'records who did something must be behind requireApiKey.',
+    );
+  }
+  return principal;
 }

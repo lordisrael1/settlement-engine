@@ -35,10 +35,30 @@ than a receipt ([ADR-0050](../../docs/adr/0050-webhooks-accepted-durably.md),
 | `GET` | `/reconciliation/summary?from&to` | Matched, explained and exception counts, plus money reported and not yet banked |
 | `GET` | `/exceptions`, `/exceptions/:key` | The queue, worst first, with the candidates the matcher rejected |
 | `POST` | `/exceptions/:key/resolve` | Maker-checked; an unapproved write-off is a 422 |
+| `GET` | `/evidence/:id` | Metadata and the document's own access log. No personal data, so no grant. |
+| `GET` | `/evidence/:id/raw?reason=` | The bytes. Needs the `evidence.raw` grant and a reason; 410 once retention has run. |
+| `POST` | `/evidence/:id/exports` | Redacted by default; an original needs a second named approver. Needs `evidence.export`. |
+| `GET` | `/evidence/exports/:token` | The sealed archive, once, before it expires. The token is the credential. |
 
-Management endpoints require `X-API-Key`. Webhooks authenticate by the provider's signature
-and nothing else, because a provider holds no credential of ours
+Management endpoints require `X-API-Key`, and the key belongs to a **named principal** whose
+name is what every audit record carries
+([ADR-0066](../../docs/adr/0066-pci-scope-and-evidence-access.md)). Webhooks authenticate by
+the provider's signature and nothing else, because a provider holds no credential of ours
 ([ADR-0052](../../docs/adr/0052-two-authentication-rails.md)).
+
+## The data-protection boundary
+
+`POST /webhooks/:source` gained a fifth step, between the signature check and the insert: a
+delivery carrying a card number or sensitive authentication data is refused with a 422 and
+**nothing is stored**. This is the only place in the system that can keep card data out of
+the database, because the step after it is the durable acceptance the whole rail is built
+around. The upload rails are guarded the same way, inside `@recon/ingest`.
+
+The worker redacts each delivery's payload in the same transaction that records what it
+meant, so there is no window in which a delivery is both worked and unredacted
+([ADR-0064](../../docs/adr/0064-redaction-at-the-boundary.md)). Evidence uploaded here is
+encrypted per record before it is stored, and `receivedFrom` is the verified principal rather
+than a name the caller supplied about itself.
 
 ## Running it
 
@@ -47,6 +67,9 @@ and nothing else, because a provider holds no credential of ours
     curl localhost:8080/health
     curl -H 'x-api-key: local-dev-key-0123456789' localhost:8080/balances
     curl -X POST -H 'x-api-key: local-dev-key-0123456789' localhost:8080/reconcile/runs
+
+    # The bytes of a document, which needs the grant and a reason.
+    curl -H 'x-api-key: local-dev-audit-0123456789'       'localhost:8080/evidence/<id>/raw?reason=dispute%204417'
 
 ## What does not belong here
 
@@ -65,4 +88,7 @@ code carrying the engine's own message rather than a generic one.
 `src/api.test.ts` drives every endpoint through the real router via `app.inject()`, with no
 port bound, against a real Postgres. It asserts correct status codes and authentication, a
 signed webhook flowing end to end into an `authorized` transaction, and that no business
-logic lives in this layer.
+logic lives in this layer — plus, since ADR-0066, that a delivery carrying a synthetic PAN is
+refused with nothing stored, that a worked delivery keeps its reference and loses the
+customer, that a valid key without `evidence.raw` is a 403, and that an original export
+without a second named person is a 422.

@@ -42,7 +42,7 @@ New record: copy the most recent file, take the next number, and add a row below
 | 0030 | [Fee contracts are versioned data, not a function](0030-versioned-fee-contracts.md) | Accepted — supersedes the fee half of ADR-0026 |
 | 0031 | [Deadlines are business days and cut-offs, not fixed minutes](0031-business-day-deadlines.md) | Accepted — supersedes ADR-0008 and the window half of ADR-0026 |
 | 0032 | [Allocation is an amount, so settlement can be partial and split](0032-allocations-carry-an-amount.md) | Accepted |
-| 0033 | [Evidence is content-addressed and retained; narration is tokenised](0033-content-addressed-evidence.md) | Accepted |
+| 0033 | [Evidence is content-addressed and retained; narration is tokenised](0033-content-addressed-evidence.md) | Accepted — the retention half superseded by ADR-0065 |
 | 0034 | [Human resolutions are appended, never applied](0034-resolutions-are-append-only.md) | Accepted |
 | 0035 | [The matcher escalates ambiguity rather than resolving it](0035-the-matcher-escalates-ambiguity.md) | Accepted |
 | 0036 | [The reason-code taxonomy covers the three-way model](0036-reason-code-taxonomy.md) | Accepted |
@@ -61,7 +61,7 @@ New record: copy the most recent file, take the next number, and add a row below
 | 0049 | [The product database is not a fourth record](0049-the-product-database-is-not-a-record.md) | Accepted |
 | 0050 | [A webhook is accepted durably and interpreted afterwards](0050-webhooks-accepted-durably.md) | Accepted |
 | 0051 | [The upload rails parse inside the request](0051-upload-rails-parse-synchronously.md) | Accepted |
-| 0052 | [Signature authentication for providers, an API key for operators](0052-two-authentication-rails.md) | Accepted |
+| 0052 | [Signature authentication for providers, an API key for operators](0052-two-authentication-rails.md) | Accepted — the operator-identity half superseded by ADR-0066 |
 | 0053 | [Structural scaling concerns are built now; capacity tuning is deferred](0053-scaling-decisions-built-and-deferred.md) | Accepted |
 | 0054 | [Summarising and resolving live in the reconciler, not in route handlers](0054-domain-logic-stays-out-of-the-api.md) | Accepted |
 | 0055 | [The policy join is a package, because two deployables need it](0055-the-policy-join-is-a-package.md) | Accepted |
@@ -72,3 +72,7 @@ New record: copy the most recent file, take the next number, and add a row below
 | 0060 | [Arrival order is an argument, and the final state may not depend on it](0060-arrival-order-independence.md) | Accepted |
 | 0061 | [The chargeback settlement status is unreachable through ingest, and is recorded as a gap](0061-chargeback-settlement-status-is-unreachable.md) | Accepted |
 | 0062 | [simulate runs in a schema of its own](0062-simulate-runs-in-its-own-schema.md) | Accepted |
+| 0063 | [Evidence is encrypted per record, and the keys are not in the database](0063-envelope-encryption-for-evidence.md) | Accepted |
+| 0064 | [Provider payloads are reduced to a keep-list, and the signature is not re-runnable afterwards](0064-redaction-at-the-boundary.md) | Accepted |
+| 0065 | [Evidence is split into an immutable record and an expiring body, on a schedule a command runs](0065-evidence-retention-schedule.md) | Accepted — supersedes the retention half of ADR-0033 |
+| 0066 | [Tokens and approved truncations only, and every read of a document is attributable](0066-pci-scope-and-evidence-access.md) | Accepted — supersedes the operator-identity half of ADR-0052 |

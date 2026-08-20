@@ -12,13 +12,17 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist", "migrations"],
+  "files": [
+    "dist",
+    "migrations"
+  ],
   "scripts": {
     "build": "tsc --build"
   },
   "dependencies": {
     "@recon/canon": "0.0.0",
     "@recon/ledger-core": "0.0.0",
+    "@recon/protect": "0.0.0",
     "pg": "^8.16.3"
   },
   "devDependencies": {

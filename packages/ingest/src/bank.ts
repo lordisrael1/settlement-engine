@@ -1,5 +1,6 @@
 import type { BankStatementLine, Evidence, RowLineage, SourceId } from '@recon/canon';
 import { arrayLineage, idempotencyKey, money } from '@recon/canon';
+import { refuseCardData } from '@recon/protect';
 
 import { evidenceOf, type EvidenceContext } from './evidence.js';
 import type { RejectedRow } from './settlement/types.js';
@@ -65,6 +66,11 @@ export function ingestBankStatement(
   payload: Buffer,
   context: BankStatementContext,
 ): BankStatementIngestResult {
+  // A statement is the one artifact here that a human exported by hand from a banking
+  // portal, which is exactly how the wrong export gets uploaded. Refused before an evidence
+  // record exists, so there is nothing to go back and delete (ADR-0066).
+  refuseCardData(payload, `This ${context.bank} statement`);
+
   const evidence = evidenceOf(
     payload,
     { ...context, kind: 'bank_statement', source: context.bank },

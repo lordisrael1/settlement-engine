@@ -6,5 +6,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../canon" }]
+  "references": [{ "path": "../canon" }, { "path": "../protect" }]
 }

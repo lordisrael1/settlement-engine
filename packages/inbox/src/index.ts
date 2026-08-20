@@ -24,6 +24,12 @@
  * package stores deliveries and hands them back; `@recon/ingest` decides what bytes mean
  * and `@recon/ledger-core` decides what the books do about it. The handler passed to
  * `drain` is where a deployable joins the three, which is the only place that join belongs.
+ *
+ * The redactor passed alongside it obeys the same rule. A worked delivery has no further
+ * use for the payload a provider sent — and that payload is the largest collection of
+ * personal data in this system — so the original is replaced in the same transaction that
+ * records what the delivery meant. Which fields survive is a question about providers, so
+ * the answer arrives as an argument (ADR-0064).
  */
 
 export {
@@ -32,6 +38,8 @@ export {
   deliveryId,
   drain,
   inboxDepth,
+  inboxOriginals,
+  redactInboxOriginals,
   INBOX_MIGRATIONS_DIR,
   type Accepted,
   type ClaimedDelivery,
@@ -41,4 +49,5 @@ export {
   type DrainOptions,
   type DrainReport,
   type InboundDelivery,
+  type Redactor,
 } from './inbox.js';

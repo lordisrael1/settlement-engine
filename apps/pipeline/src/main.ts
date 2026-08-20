@@ -7,6 +7,7 @@ import {
   SOURCE_IDS,
   sourceProfile,
 } from '@recon/ingest';
+import { INBOX_MIGRATIONS_DIR } from '@recon/inbox';
 import {
   createPool,
   LEDGER_MIGRATIONS_DIR,
@@ -25,7 +26,9 @@ import {
 } from '@recon/reconciler';
 
 import { runDemo } from './demo.js';
+import { runRetentionCommand } from './retention.js';
 import { runSimulation } from './simulate.js';
+import { vaultFromEnv } from './vault.js';
 
 /**
  * Whose books these are.
@@ -49,7 +52,7 @@ import {
  * system is adding it to this list — there is no shared file everyone edits and nobody
  * reviews.
  */
-const MIGRATIONS = [LEDGER_MIGRATIONS_DIR, RECONCILER_MIGRATIONS_DIR];
+const MIGRATIONS = [LEDGER_MIGRATIONS_DIR, RECONCILER_MIGRATIONS_DIR, INBOX_MIGRATIONS_DIR];
 
 /**
  * The deployable.
@@ -72,6 +75,7 @@ const COMMANDS = [
   'reconcile',
   'exceptions',
   'replay',
+  'evidence-retention',
 ] as const;
 type Command = (typeof COMMANDS)[number];
 
@@ -178,7 +182,7 @@ async function main(argv: readonly string[]): Promise<number> {
         // Storing the file and the records is what makes re-ingesting the same export a
         // no-op across restarts rather than only within one process (ADR-0020), and what
         // makes the conclusion reproducible from the bytes months later.
-        await recordEvidence(pool, result.evidence, bytes);
+        await recordEvidence(pool, result.evidence, bytes, vaultFromEnv());
         const payouts = await recordPayouts(pool, result.payouts);
         const lines = await recordSettlementLines(pool, result.lines);
 
@@ -221,7 +225,7 @@ async function main(argv: readonly string[]): Promise<number> {
           line(`  – ${rejected.kind}: ${rejected.reason}`);
         }
 
-        await recordEvidence(pool, result.evidence, bytes);
+        await recordEvidence(pool, result.evidence, bytes, vaultFromEnv());
         const stored = await recordBankLines(pool, result.lines);
         line();
         line(`  ${stored.stored} stored, ${stored.duplicates} already seen.`);
@@ -271,6 +275,25 @@ async function main(argv: readonly string[]): Promise<number> {
           line(`    ${drift.what} ${drift.key}: log says ${drift.fromEvents}, live says ${drift.live}`);
         }
         return 1;
+      }
+
+      /**
+       * Move every document to the state its retention schedule says it should be in.
+       *
+       * A dry run unless `--apply` is given, because a command that destroys financial
+       * evidence should have to be asked twice. Every destruction it carries out appends an
+       * `EvidencePurged` event, so the deletion is part of the same narrative as everything
+       * else that happened to the money (ADR-0065).
+       */
+      case 'evidence-retention': {
+        await runMigrations(pool, MIGRATIONS);
+        // Awaited, not returned. `return promise` inside this try/finally would run
+        // `pool.end()` before the command had finished with it — every other case here
+        // awaits and returns a number, which is why none of them tripped over it.
+        return await runRetentionCommand(pool, {
+          asOf: new Date(),
+          apply: argv.includes('--apply'),
+        });
       }
 
       case 'exceptions': {

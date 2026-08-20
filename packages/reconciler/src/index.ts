@@ -106,7 +106,6 @@ export {
 
 export {
   RECONCILER_MIGRATIONS_DIR,
-  recordEvidence,
   saveFeeContract,
   loadFeeContracts,
   recordPayouts,
@@ -146,3 +145,31 @@ export {
   type ReconcileInput,
   type ReconciliationRun,
 } from './run.js';
+
+export {
+  accessLog,
+  accessVolume,
+  evidenceAt,
+  readEvidenceBytes,
+  recordAccess,
+  recordEvidence,
+  runRetention,
+  type AccessRecord,
+  type EvidenceAccess,
+  type EvidenceBytes,
+  type EvidenceRecord,
+  type EvidenceVault,
+  type RetentionAction,
+  type RetentionOptions,
+  type RetentionReport,
+} from './evidence.js';
+
+export {
+  claimExport,
+  issueExport,
+  EvidenceUnavailableError,
+  UnapprovedExportError,
+  type ExportClaim,
+  type ExportOptions,
+  type IssuedExport,
+} from './export.js';

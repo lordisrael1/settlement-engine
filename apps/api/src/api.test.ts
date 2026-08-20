@@ -7,11 +7,14 @@ import type { Pool } from 'pg';
 
 import { deliveryAt, drain, INBOX_MIGRATIONS_DIR } from '@recon/inbox';
 import { createPool, LEDGER_MIGRATIONS_DIR, runMigrations } from '@recon/ledger-core';
+import { DEFAULT_RETENTION } from '@recon/canon';
+import { localKeyRing, openWithKey, parseLocalKey } from '@recon/protect';
 import { RECONCILER_MIGRATIONS_DIR } from '@recon/reconciler';
 
 import { buildApp } from './app.js';
 import type { Config } from './config.js';
-import { interpretDelivery } from './worker.js';
+import { Principals } from './principals.js';
+import { interpretDelivery, REDACT_DELIVERY } from './worker.js';
 
 /**
  * The contract, exercised through the real router.
@@ -33,13 +36,31 @@ const DATABASE_URL = process.env['DATABASE_URL'];
 
 const NOW = new Date('2026-08-15T10:00:00Z');
 const API_KEY = 'test-key-0123456789abcdef';
+/** A second principal, holding the two grants that hand over personal data (ADR-0066). */
+const AUDITOR_KEY = 'auditor-key-0123456789abcdef';
+const APPROVER = 'chidi@example.com';
 const PAYSTACK_SECRET = 'sk_test_api_suite_secret';
 const FLUTTERWAVE_SECRET = 'flw_test_api_suite_hash';
 
 const CONFIG: Config = {
   host: '127.0.0.1',
   port: 0,
-  apiKey: API_KEY,
+  // Two principals rather than one shared key, because the suite has to be able to reach
+  // the state where a valid key is refused for lacking a grant — which is most of what the
+  // evidence endpoints are for.
+  principals: Principals.of([
+    { name: 'amaka@example.com', secret: API_KEY },
+    {
+      name: 'auditor@example.com',
+      secret: AUDITOR_KEY,
+      grants: ['evidence.raw', 'evidence.export'],
+    },
+  ]),
+  vault: {
+    keyRing: localKeyRing([parseLocalKey(`test:${Buffer.alloc(32, 3).toString('base64')}`)], 'test'),
+    retention: DEFAULT_RETENTION,
+  },
+  exportTtlMs: 15 * 60 * 1000,
   merchantId: 'merchant-under-test',
   bankAccountId: 'gtb-3011',
   bank: 'gtbank',
@@ -172,7 +193,14 @@ describe('the service', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run'
 
   /** The worker's own handler, run on demand rather than on its timer. */
   const work = () =>
-    drain(pool, interpretDelivery(CONFIG, () => NOW), { at: NOW, limit: 50, maxAttempts: 3 });
+    drain(pool, interpretDelivery(CONFIG, () => NOW), {
+      at: NOW,
+      limit: 50,
+      maxAttempts: 3,
+      // Exactly what `startInboxWorker` drains with. A suite that built its own options
+      // would be testing a redaction the service does not perform.
+      redact: REDACT_DELIVERY,
+    });
 
   const balanceOf = async (accountId: string): Promise<bigint> => {
     const response = await app.inject({ method: 'GET', url: '/balances', headers: authed() });
@@ -376,7 +404,9 @@ describe('the service', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run'
       method: 'POST',
       url: '/ingest/settlement/flutterwave?filename=flw-api-test.json',
       payload: JSON.stringify(SETTLEMENT),
-      headers: authed({ 'content-type': 'application/json', 'x-recon-operator': 'amaka@example.com' }),
+      // No operator header: the uploader is the authenticated principal now, and a name a
+      // caller supplied about itself is not one (ADR-0066).
+      headers: authed({ 'content-type': 'application/json' }),
     });
 
     assert.equal(response.statusCode, 201);
@@ -612,5 +642,245 @@ describe('the service', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run'
     });
 
     assert.equal(response.statusCode, 404);
+  });
+  // ── The data-protection boundary ──────────────────────────────────────────
+  //
+  // Four claims, and each is about something the service refuses to do rather than
+  // something it does: it will not store a card number, it will not keep a customer's
+  // details after the delivery is worked, it will not hand over bytes to a key that lacks
+  // the grant, and it will not export an original without a second named person.
+
+  const auditor = (extra: Record<string, string> = {}) => ({
+    'x-api-key': AUDITOR_KEY,
+    ...extra,
+  });
+
+  test('a delivery carrying a card number is refused and nothing is stored', async () => {
+    // The invariant the PCI scope claim rests on. Authentic, signed correctly, and still
+    // refused — because the alternative is a row somebody has to go and delete, in a table
+    // whose backups have already been taken (ADR-0066).
+    const body = Buffer.from(
+      JSON.stringify({
+        event: 'charge.success',
+        data: {
+          status: 'success',
+          reference: 'PSK_smuggled',
+          amount: 100000,
+          currency: 'NGN',
+          channel: 'card',
+          paid_at: '2026-08-13T09:14:22.000Z',
+          created_at: '2026-08-13T09:14:02.000Z',
+          authorization: { card_number: '5060991234564413' },
+        },
+      }),
+      'utf8',
+    );
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/webhooks/paystack',
+      payload: body,
+      headers: { 'content-type': 'application/json', 'x-paystack-signature': sign(body) },
+    });
+
+    assert.equal(response.statusCode, 422);
+    const error = (response.json() as { error: string }).error;
+    assert.match(error, /nothing was stored/);
+    // The refusal names the finding and never the digits.
+    assert.ok(!error.includes('5060991234564413'));
+
+    const stored = await pool.query('SELECT 1 FROM webhook_inbox WHERE raw::text LIKE $1', [
+      '%PSK_smuggled%',
+    ]);
+    assert.equal(stored.rowCount, 0);
+  });
+
+  test('a worked delivery keeps its meaning and loses the customer', async () => {
+    const body = Buffer.from(JSON.stringify(charge('PSK_redaction', 250_000)), 'utf8');
+    const accepted = await app.inject({
+      method: 'POST',
+      url: '/webhooks/paystack',
+      payload: body,
+      headers: { 'content-type': 'application/json', 'x-paystack-signature': sign(body) },
+    });
+    assert.equal(accepted.statusCode, 200);
+
+    // Before the drain the original is here, because the worker re-verifies the signature
+    // over exactly these bytes and cannot do that over a reduced copy.
+    const { deliveryId } = accepted.json() as { deliveryId: string };
+    const before = await pool.query<{ raw: Buffer; content: string }>(
+      'SELECT raw, content FROM webhook_inbox WHERE delivery_id = $1',
+      [deliveryId],
+    );
+    assert.equal(before.rows[0]!.content, 'original');
+    assert.ok(before.rows[0]!.raw.toString('utf8').includes('amaka@example.com'));
+
+    const report = await work();
+    assert.ok(report.redacted >= 1);
+
+    const after = await pool.query<{ raw: Buffer; content: string; redacted_at: Date | null }>(
+      'SELECT raw, content, redacted_at FROM webhook_inbox WHERE delivery_id = $1',
+      [deliveryId],
+    );
+    assert.equal(after.rows[0]!.content, 'redacted');
+    assert.equal(after.rows[0]!.redacted_at?.getTime(), NOW.getTime());
+
+    const text = after.rows[0]!.raw.toString('utf8');
+    assert.ok(text.includes('PSK_redaction'));
+    for (const gone of ['amaka@example.com', 'AUTH_k2p9wz', '4412']) {
+      assert.ok(!text.includes(gone), `${gone} survived the drain`);
+    }
+
+    // And the delivery is still answerable, which is the promise the inbox makes.
+    const fate = await app.inject({
+      method: 'GET',
+      url: `/deliveries/${deliveryId}`,
+      headers: authed(),
+    });
+    assert.equal(fate.statusCode, 200);
+    assert.equal((fate.json() as { state: string }).state, 'processed');
+  });
+
+  /** Upload a statement and hand back the evidence id it produced. */
+  const uploadStatement = async (): Promise<string> => {
+    const statement = JSON.stringify({
+      bankAccountId: 'gtb-3011',
+      lines: [
+        {
+          reference: `EV-${randomUUID().slice(0, 8)}`,
+          amountKobo: '100000',
+          direction: 'credit',
+          narration: 'PAYSTACK SETTLEMENT',
+          valueDate: '2026-08-14T00:00:00Z',
+          postedAt: '2026-08-14T06:00:00Z',
+        },
+      ],
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/ingest/bank?account=gtb-3011&bank=gtbank',
+      payload: statement,
+      headers: authed({ 'content-type': 'application/json' }),
+    });
+    assert.equal(response.statusCode, 201);
+    return (response.json() as { evidenceId: string }).evidenceId;
+  };
+
+  test('metadata is readable by any operator and names who uploaded it', async () => {
+    const evidenceId = await uploadStatement();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/evidence/${evidenceId}`,
+      headers: authed(),
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = response.json() as {
+      receivedFrom: string;
+      held: { content: string };
+      access: { principal: string; action: string }[];
+    };
+    // The verified principal, not a name the caller supplied about itself (ADR-0066).
+    assert.equal(body.receivedFrom, 'amaka@example.com');
+    assert.equal(body.held.content, 'original');
+    assert.ok(body.access.some((entry) => entry.action === 'read_metadata'));
+  });
+
+  test('the bytes need their own grant, and a reason', async () => {
+    const evidenceId = await uploadStatement();
+
+    // A perfectly valid management key. Reading balances all day is not a reason to be able
+    // to read provider payloads, and an audit log where everybody could have done
+    // everything narrows nothing down.
+    const refused = await app.inject({
+      method: 'GET',
+      url: `/evidence/${evidenceId}/raw?reason=curiosity`,
+      headers: authed(),
+    });
+    assert.equal(refused.statusCode, 403);
+    assert.match((refused.json() as { error: string }).error, /evidence\.raw/);
+
+    const unreasoned = await app.inject({
+      method: 'GET',
+      url: `/evidence/${evidenceId}/raw`,
+      headers: auditor(),
+    });
+    assert.equal(unreasoned.statusCode, 400);
+
+    const allowed = await app.inject({
+      method: 'GET',
+      url: `/evidence/${evidenceId}/raw?reason=${encodeURIComponent('dispute 4417')}`,
+      headers: auditor(),
+    });
+    assert.equal(allowed.statusCode, 200);
+    assert.equal(allowed.headers['x-recon-evidence-content'], 'original');
+    assert.equal(allowed.headers['x-recon-hash-matches-id'], 'true');
+
+    // The read is in the visitors' book, with the reason and the verified principal.
+    const log = await pool.query<{ principal: string; reason: string }>(
+      `SELECT principal, reason FROM evidence_access
+        WHERE evidence_id = $1 AND action = 'read_raw'`,
+      [evidenceId],
+    );
+    assert.equal(log.rows[0]!.principal, 'auditor@example.com');
+    assert.equal(log.rows[0]!.reason, 'dispute 4417');
+  });
+
+  test('an original export needs a second named person; a redacted one does not', async () => {
+    const evidenceId = await uploadStatement();
+
+    const unapproved = await app.inject({
+      method: 'POST',
+      url: `/evidence/${evidenceId}/exports`,
+      payload: { reason: 'auditor request', content: 'original' },
+      headers: auditor({ 'content-type': 'application/json' }),
+    });
+    assert.equal(unapproved.statusCode, 422);
+    assert.match((unapproved.json() as { error: string }).error, /second named approver/);
+
+    // Naming yourself is one person named twice — the same rule a write-off is measured
+    // against (ADR-0042), not a second one that could quietly diverge.
+    const selfApproved = await app.inject({
+      method: 'POST',
+      url: `/evidence/${evidenceId}/exports`,
+      payload: {
+        reason: 'auditor request',
+        content: 'original',
+        approvedBy: 'auditor@example.com',
+      },
+      headers: auditor({ 'content-type': 'application/json' }),
+    });
+    assert.equal(selfApproved.statusCode, 422);
+
+    const approved = await app.inject({
+      method: 'POST',
+      url: `/evidence/${evidenceId}/exports`,
+      payload: { reason: 'auditor request', content: 'original', approvedBy: APPROVER },
+      headers: auditor({ 'content-type': 'application/json' }),
+    });
+    assert.equal(approved.statusCode, 201);
+    const issued = approved.json() as { url: string; archiveKey: string; exportId: string };
+
+    // The link is collected once, and what comes back is unreadable without the key that
+    // was returned exactly once above.
+    const collected = await app.inject({ method: 'GET', url: issued.url });
+    assert.equal(collected.statusCode, 200);
+    assert.ok(!collected.rawPayload.includes(Buffer.from('PAYSTACK SETTLEMENT', 'utf8')));
+
+    const opened = openWithKey(
+      Buffer.from(issued.archiveKey, 'base64'),
+      {
+        nonce: collected.rawPayload.subarray(0, 12),
+        authTag: collected.rawPayload.subarray(12, 28),
+        ciphertext: collected.rawPayload.subarray(28),
+      },
+      { export_id: issued.exportId },
+    );
+    assert.ok(opened.toString('utf8').includes('PAYSTACK SETTLEMENT'));
+
+    const again = await app.inject({ method: 'GET', url: issued.url });
+    assert.equal(again.statusCode, 410);
   });
 });

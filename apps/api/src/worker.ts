@@ -1,8 +1,9 @@
 import type { Pool } from 'pg';
 
-import { drain, type DeliveryHandler, type DrainReport } from '@recon/inbox';
+import { drain, type DeliveryHandler, type DrainReport, type Redactor } from '@recon/inbox';
 import { ingestWebhook } from '@recon/ingest';
 import { bookAuthorizedPayment, UnbookablePaymentError } from '@recon/ledger-core';
+import { redact } from '@recon/protect';
 
 import type { Config } from './config.js';
 
@@ -80,6 +81,19 @@ export function interpretDelivery(config: Config, now: () => Date): DeliveryHand
   };
 }
 
+/**
+ * The delivery's original payload is replaced in the same transaction that records what it
+ * meant.
+ *
+ * A worked delivery has no further use for a customer's name, email and IP address, and the
+ * drain's own transaction is the last moment anything needs the original bytes — so it is
+ * the first moment they can go, with no window in between (ADR-0064).
+ *
+ * Exported so the suite drains with exactly what the worker drains with. A test that built
+ * its own options would be testing a redaction the service does not perform.
+ */
+export const REDACT_DELIVERY: Redactor = (delivery) => redact(delivery.rawBody);
+
 export interface InboxWorker {
   /** Stop looking for new deliveries and wait for the pass in flight. */
   readonly stop: () => Promise<void>;
@@ -116,6 +130,7 @@ export function startInboxWorker(
         limit: config.drain.batch,
         maxAttempts: config.drain.maxAttempts,
         at: now(),
+        redact: REDACT_DELIVERY,
       });
       if (drained.claimed > 0) report(drained);
     } catch (error) {

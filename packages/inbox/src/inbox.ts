@@ -116,6 +116,22 @@ export type DeliveryHandler = (
   db: Executor,
 ) => Promise<DeliveryOutcome>;
 
+/**
+ * What to keep of a payload once it has been worked.
+ *
+ * Bytes in, bytes out, and this package deliberately does not know which bytes. The inbox
+ * has never heard of a signature scheme, a provider or a payment, and a keep-list of
+ * provider field paths would be all three at once — so the deployable supplies the
+ * redactor, exactly as it supplies the handler (`@recon/protect` provides the one every
+ * deployable here uses).
+ *
+ * Returning `null` keeps the original, which is the honest answer for a payload a redactor
+ * cannot interpret. There is deliberately no default: omitting it stores whole provider
+ * payloads forever, and that should be a decision somebody made rather than a field they
+ * did not fill in.
+ */
+export type Redactor = (delivery: ClaimedDelivery) => { bytes: Buffer; dropped: number } | null;
+
 export interface DrainOptions {
   /** How many deliveries to work in this pass. The queue is drained by repeated passes. */
   readonly limit?: number;
@@ -126,6 +142,15 @@ export interface DrainOptions {
   readonly maxAttempts?: number;
   /** The clock, as an argument (determinism). */
   readonly at: Date;
+  /**
+   * Replace the stored payload with a reduced copy, in the same transaction that records
+   * what the delivery meant.
+   *
+   * Only ever applied to a delivery that reached a terminal answer. A delivery that threw
+   * is going to be claimed again and re-verified against its signature, so its bytes must
+   * still be the bytes the provider signed (ADR-0064).
+   */
+  readonly redact?: Redactor;
 }
 
 export interface DrainReport {
@@ -137,6 +162,14 @@ export interface DrainReport {
   readonly retrying: number;
   /** Threw once too often. Nobody will try again without a person. */
   readonly failed: number;
+  /**
+   * Deliveries whose original payload was replaced as they were worked.
+   *
+   * Worth reporting rather than assuming: a drain that processes a hundred deliveries and
+   * redacts none is a deployment storing a hundred provider payloads, and the only symptom
+   * before somebody reads the table is this number.
+   */
+  readonly redacted: number;
 }
 
 const DEFAULTS = { limit: 100, maxAttempts: 8 };
@@ -168,6 +201,7 @@ export async function drain(
   let rejected = 0;
   let retrying = 0;
   let failed = 0;
+  let redacted = 0;
 
   for (let worked = 0; worked < limit; worked += 1) {
     let attempted: ClaimedDelivery | null = null;
@@ -179,10 +213,22 @@ export async function drain(
         attempted = delivery;
 
         const result = await handle(delivery, client);
+
+        // The delivery has reached a terminal answer, so nothing will ask for these bytes
+        // again — which makes this the last moment the original is needed and therefore the
+        // first moment it can go. One statement, one transaction: there is no window in
+        // which the delivery is both worked and unredacted.
+        const reduced = options.redact ? options.redact(delivery) : null;
+        if (reduced) redacted += 1;
+
         await client.query(
           `UPDATE webhook_inbox
               SET state = $2, detail = $3, transaction_id = $4, processed_at = $5,
-                  attempts = attempts + 1, last_error = NULL
+                  attempts = attempts + 1, last_error = NULL,
+                  raw = COALESCE($6, raw),
+                  content = CASE WHEN $6 IS NULL THEN content ELSE 'redacted' END,
+                  redacted_at = CASE WHEN $6 IS NULL THEN redacted_at ELSE $5 END,
+                  redacted_dropped = COALESCE($7, redacted_dropped)
             WHERE delivery_id = $1`,
           [
             delivery.deliveryId,
@@ -190,6 +236,8 @@ export async function drain(
             result.detail,
             result.state === 'processed' ? result.transactionId : null,
             options.at,
+            reduced?.bytes ?? null,
+            reduced?.dropped ?? null,
           ],
         );
         return result;
@@ -213,7 +261,89 @@ export async function drain(
     }
   }
 
-  return { claimed, processed, ignored, rejected, retrying, failed };
+  return { claimed, processed, ignored, rejected, retrying, failed, redacted };
+}
+
+/**
+ * The stragglers: originals past the retention window that the drain never got to.
+ *
+ * The drain redacts everything it works, so in a healthy deployment this finds nothing.
+ * What it exists for is the rows the drain will never work — a delivery that failed its
+ * last attempt and is waiting for a person, or one still pending because a worker has been
+ * down for a month. Those are exactly the payloads that would otherwise sit in the table
+ * indefinitely, and "we hold personal data only for deliveries that went wrong" is not a
+ * retention policy anybody wants to defend.
+ *
+ * The cost is stated rather than hidden: after this runs, a failed delivery can no longer
+ * be replayed, because its signature can no longer be verified over bytes that are no
+ * longer the ones the provider signed. Thirty days is long enough to fix a parser.
+ */
+export async function redactInboxOriginals(
+  db: Pool,
+  options: { before: Date; at: Date; redact: Redactor; limit?: number },
+): Promise<{ redacted: number }> {
+  let redacted = 0;
+
+  for (let worked = 0; worked < (options.limit ?? 500); worked += 1) {
+    const done = await inTransaction(db, async (client) => {
+      const result = await client.query<{
+        delivery_id: string;
+        source: string;
+        headers: Record<string, string | string[] | undefined>;
+        raw: Buffer;
+        received_at: Date;
+        attempts: number;
+      }>(
+        // Locked one at a time and skipped if busy, exactly as the drain claims: a
+        // retention sweep must never make a worker wait for a delivery it is holding.
+        `SELECT delivery_id, source, headers, raw, received_at, attempts
+           FROM webhook_inbox
+          WHERE content = 'original' AND received_at < $1
+          ORDER BY received_at, delivery_id
+          LIMIT 1
+            FOR UPDATE SKIP LOCKED`,
+        [options.before],
+      );
+
+      const row = result.rows[0];
+      if (!row) return false;
+
+      const reduced = options.redact({
+        deliveryId: row.delivery_id,
+        source: row.source,
+        headers: row.headers,
+        rawBody: row.raw,
+        receivedAt: row.received_at,
+        attempts: row.attempts,
+      });
+      if (!reduced) return false;
+
+      await client.query(
+        `UPDATE webhook_inbox
+            SET raw = $2, content = 'redacted', redacted_at = $3, redacted_dropped = $4
+          WHERE delivery_id = $1`,
+        [row.delivery_id, reduced.bytes, options.at, reduced.dropped],
+      );
+      return true;
+    });
+
+    if (!done) break;
+    redacted += 1;
+  }
+
+  return { redacted };
+}
+
+/** How much of the inbox is still holding a provider's payload exactly as it arrived. */
+export async function inboxOriginals(
+  db: Executor,
+): Promise<{ originals: number; oldest: Date | null }> {
+  const result = await db.query<{ count: string; oldest: Date | null }>(
+    `SELECT COUNT(*)::text AS count, MIN(received_at) AS oldest
+       FROM webhook_inbox WHERE content = 'original'`,
+  );
+  const row = result.rows[0];
+  return { originals: Number(row?.count ?? '0'), oldest: row?.oldest ?? null };
 }
 
 async function claim(db: Executor, maxAttempts: number): Promise<ClaimedDelivery | null> {

@@ -7,6 +7,7 @@ import Fastify, {
 import { inboxDepth } from '@recon/inbox';
 
 import { statusFor } from './errors.js';
+import { evidenceRoutes } from './routes/evidence.js';
 import { ingestRoutes } from './routes/ingest.js';
 import { managementRoutes } from './routes/management.js';
 import { webhookRoutes } from './routes/webhooks.js';
@@ -21,7 +22,7 @@ import type { Services } from './services.js';
  * either picks a fixed one and cannot run twice at once, or picks a random one and has to
  * discover it; neither difficulty is anything to do with reconciliation.
  *
- * Three plugins, and the split between them is not cosmetic. Each is its own Fastify scope,
+ * Four plugins, and the split between them is not cosmetic. Each is its own Fastify scope,
  * which is what lets the webhook and upload rails swap the body parser for one that keeps
  * the raw bytes while the management routes go on receiving parsed JSON. Signatures are
  * computed over bytes; a JSON parser upstream of a verification is a rejection of valid
@@ -76,6 +77,7 @@ export function buildApp(services: Services, options: FastifyServerOptions = {})
 
   app.register(webhookRoutes, services);
   app.register(ingestRoutes, services);
+  app.register(evidenceRoutes, services);
   app.register(managementRoutes, services);
 
   return app;

@@ -35,6 +35,8 @@ import {
   saveFeeContract,
 } from '@recon/reconciler';
 
+import { vaultFromEnv } from './vault.js';
+
 import {
   heading,
   line,
@@ -218,7 +220,7 @@ export async function runDemo(pool: Pool): Promise<boolean> {
   line('  The USD row is refused rather than converted: a guessed exchange rate is a wrong');
   line('  number wearing a confident face.');
 
-  await recordEvidence(pool, reported.evidence, settlementBytes);
+  await recordEvidence(pool, reported.evidence, settlementBytes, vaultFromEnv());
   await recordPayouts(pool, reported.payouts);
   await recordSettlementLines(pool, reported.lines);
 
@@ -285,7 +287,7 @@ export async function runDemo(pool: Pool): Promise<boolean> {
   line('  The narration is tokenised, never interpreted. The parser says "these strings');
   line('  could be references"; the matcher decides, against payouts it actually holds.');
 
-  await recordEvidence(pool, statement.evidence, statementBytes);
+  await recordEvidence(pool, statement.evidence, statementBytes, vaultFromEnv());
   await recordBankLines(pool, statement.lines);
 
   // ── Stage three ───────────────────────────────────────────────────────────

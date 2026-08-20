@@ -5,7 +5,7 @@ paid, a settlement report says a payout is coming, a bank statement says cash la
 this decides which of them concern the same money, names every difference, and writes the
 ledger transaction that closes each one.
 
-**Depends on:** `@recon/canon`, `@recon/ledger-core`.
+**Depends on:** `@recon/canon`, `@recon/ledger-core`, `@recon/protect`.
 **Imported by:** `@recon/policy`, `apps/api`, `apps/pipeline`.
 
 Pure domain logic, deterministic, no HTTP and no clock: `asOf` is always passed in, so a run
@@ -46,7 +46,10 @@ bank-charge allowance. There is no source name here to branch on. `@recon/policy
 
 | Table | Holds |
 |---|---|
-| `evidence` | every file, content-addressed by SHA-256, with uploader, parser version and storage locator |
+| `evidence` | every file, content-addressed by SHA-256, with uploader, parser version and storage locator. **The bytes are not here.** |
+| `evidence_blobs` | those bytes, encrypted per record, versioned `original` or `redacted`, with an expiry |
+| `evidence_access` | who read which document, when, why, and under whose approval |
+| `evidence_exports` | copies taken out of the system, sealed under a key we do not keep |
 | `fee_contracts` | rate cards scoped by merchant, source, channel and currency, non-overlapping within a scope by exclusion constraint |
 | `payouts` | what each provider says it is sending, with itemised deductions |
 | `settlement_lines` | individual settled payments, for sources that list them |
@@ -57,9 +60,31 @@ bank-charge allowance. There is no source name here to branch on. `@recon/policy
 | `exception_events` | the append-only exception lifecycle; current state is a view |
 | `resolutions` | appended human decisions, with identity, approver, value and any compensating transaction |
 
-All append-only. Three invariants live in the database rather than in code: a payment can
-never be allocated beyond its receivable, one bank credit can confirm at most one inflow,
-and nobody approves their own resolution.
+All append-only except the last three. `evidence_blobs` is mutable by design, for the same
+reason `account_balances` is: a table that cannot be updated cannot expire, and **append-only
+and "delete this on a schedule" are opposite requirements** that no single table satisfies.
+Splitting them is what makes retention runnable at all — ADR-0033 described a path the
+append-only trigger had always refused
+([ADR-0065](../../docs/adr/0065-evidence-retention-schedule.md)).
+
+Five invariants live in the database rather than in code: a payment can never be allocated
+beyond its receivable, one bank credit can confirm at most one inflow, nobody approves their
+own resolution, an original export cannot be recorded without a second named approver, and a
+purged blob cannot hold ciphertext.
+
+## Evidence has a body, an expiry and a visitors' book
+
+    recordEvidence      seals the bytes; there is no unencrypted path to forget
+    readEvidenceBytes   decrypts through the key ring, or says the bytes are gone
+    recordAccess        who looked, and why — the gap every other control here leaves open
+    runRetention        redact, then purge; a dry run unless asked twice
+    issueExport         maker-checked for originals, sealed under a key nobody stores
+
+`runRetention` is driven by `pipeline evidence-retention`, not by a thread inside the
+service: a deletion of financial evidence should be something somebody scheduled, with an
+output somebody reads. Every destruction appends an `EvidencePurged` event in the same
+transaction, so it is part of the same narrative as everything else that happened to the
+money.
 
 ## The exception queue
 

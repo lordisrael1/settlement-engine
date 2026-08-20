@@ -1,6 +1,7 @@
 import type { Pool } from 'pg';
 
 import type { AccountId, SourceId } from '@recon/canon';
+import { DEFAULT_RETENTION } from '@recon/canon';
 import {
   ingestBankStatement,
   ingestSettlement,
@@ -23,7 +24,11 @@ import {
   recordSettlementLines,
   saveFeeContract,
 } from '@recon/reconciler';
+import { localKeyRing, parseLocalKey } from '@recon/protect';
+import type { EvidenceVault } from '@recon/reconciler';
 import type { Arrival, Scenario } from '@recon/simulator';
+
+import { vaultFromEnv } from './vault.js';
 
 /**
  * The harness: a generated scenario, driven through the real stack.
@@ -43,6 +48,12 @@ import type { Arrival, Scenario } from '@recon/simulator';
 export interface HarnessOptions {
   /** The provider secrets. The same ones the scenario signed with, or nothing verifies. */
   readonly secrets: Readonly<Record<SourceId, string>>;
+  /**
+   * Where evidence keys come from. An argument, like the secrets and the clock, so this
+   * harness never reaches for the environment — a suite that read `process.env` could not
+   * run two configurations in one process, which is the whole trick it is built on.
+   */
+  readonly vault?: EvidenceVault;
   readonly bankAccountId?: string;
   readonly bank?: SourceId;
   /** Reconcile after every arrival, rather than once at the end. */
@@ -164,7 +175,7 @@ async function apply(
         );
       }
 
-      await recordEvidence(pool, result.evidence, arrival.file.bytes);
+      await recordEvidence(pool, result.evidence, arrival.file.bytes, options.vault ?? vaultFromEnv());
       await recordPayouts(pool, result.payouts);
       await recordSettlementLines(pool, result.lines);
       return;
@@ -186,7 +197,7 @@ async function apply(
         );
       }
 
-      await recordEvidence(pool, result.evidence, arrival.file.bytes);
+      await recordEvidence(pool, result.evidence, arrival.file.bytes, options.vault ?? vaultFromEnv());
       await recordBankLines(pool, result.lines);
       return;
     }
@@ -204,6 +215,23 @@ export const SIMULATED_SECRETS: Readonly<Record<SourceId, string>> = {
   flutterwave: 'flw_test_simulated_secret_hash',
   nomba: 'nomba_test_simulated_secret',
   monnify: 'monnify_test_simulated_secret',
+};
+
+/**
+ * The key ring the harness seals evidence under.
+ *
+ * A fixed test key, and obviously so, for the same reason the secrets above are fixed: a
+ * suite that generated its own would still pass, and would stop being a statement about the
+ * bytes any particular run produced. Evidence is encrypted on the way in with no
+ * unencrypted path (ADR-0063), so a harness that drives the real stack needs one exactly as
+ * a deployment does.
+ */
+export const SIMULATED_VAULT: EvidenceVault = {
+  keyRing: localKeyRing(
+    [parseLocalKey(`simulated:${Buffer.alloc(32, 5).toString('base64')}`)],
+    'simulated',
+  ),
+  retention: DEFAULT_RETENTION,
 };
 
 /** The system's own answer to "when is money late", handed to the simulator. */

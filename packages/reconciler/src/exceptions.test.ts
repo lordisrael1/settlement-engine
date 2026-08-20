@@ -4,6 +4,8 @@ import { after, before, describe, test } from 'node:test';
 
 import type { Pool } from 'pg';
 
+import { localKeyRing, parseLocalKey } from '@recon/protect';
+
 import type {
   BankStatementLine,
   BusinessCalendar,
@@ -12,7 +14,7 @@ import type {
   Payout,
   SettlementAdjustment,
 } from '@recon/canon';
-import { ANY_CHANNEL, exceptionKey, feeFor, money, NO_LINEAGE } from '@recon/canon';
+import { ANY_CHANNEL, exceptionKey, feeFor, money, NO_LINEAGE, DEFAULT_RETENTION } from '@recon/canon';
 import {
   bookAuthorizedPayment,
   createPool,
@@ -35,11 +37,21 @@ import type { PolicyLookup } from './policy.js';
 import { reconcile } from './run.js';
 import {
   recordBankLines,
-  recordEvidence,
   recordPayouts,
   recordResolution,
   RECONCILER_MIGRATIONS_DIR,
 } from './store.js';
+
+import { recordEvidence, type EvidenceVault } from './evidence.js';
+
+/**
+ * A key ring for the suite. Evidence is encrypted on the way in with no unencrypted path
+ * (ADR-0063), so a test that stores a document needs one exactly as a deployment does.
+ */
+const VAULT: EvidenceVault = {
+  keyRing: localKeyRing([parseLocalKey(`test:${Buffer.alloc(32, 1).toString('base64')}`)], 'test'),
+  retention: DEFAULT_RETENTION,
+};
 
 /**
  * The queue, against a real Postgres — because what is being asserted is that the *derived*
@@ -232,7 +244,7 @@ describe('the exception queue', { skip: DATABASE_URL ? false : 'set DATABASE_URL
     assert.equal((await queueFor(id('pay-1'))).length, 1, 'one problem, not one per run');
 
     // The settlement file turns up. Nobody is woken; the question simply stops being asked.
-    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null);
+    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null, VAULT);
     await recordPayouts(pool, [
       payout(source, id('PO-late'), 700_000n, [deduction('fee', 10_500n)], id('ev')),
     ]);
@@ -264,7 +276,7 @@ describe('the exception queue', { skip: DATABASE_URL ? false : 'set DATABASE_URL
     const { source, id, policy } = scenario();
     await promise(source, id('pay-1'), 500_000n);
 
-    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null);
+    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null, VAULT);
     await recordPayouts(pool, [
       payout(source, id('PO-phantom'), 999_999n, [], id('ev')),
     ]);
@@ -291,7 +303,7 @@ describe('the exception queue', { skip: DATABASE_URL ? false : 'set DATABASE_URL
    */
   test('a human takes an item, then answers it with a resolution', async () => {
     const { source, id, policy } = scenario();
-    await recordEvidence(pool, evidence(id('ev'), 'bank_statement', source), null);
+    await recordEvidence(pool, evidence(id('ev'), 'bank_statement', source), null, VAULT);
     await recordBankLines(pool, [
       statementLine(id('bank-stray'), 424_242n, 'MISC INBOUND', id('ev')),
     ]);
@@ -338,7 +350,7 @@ describe('the exception queue', { skip: DATABASE_URL ? false : 'set DATABASE_URL
   /** Append-only, reaching the judgements: nothing in the trail may be edited or deleted. */
   test('the exception trail is append-only', async () => {
     const { source, id, policy } = scenario();
-    await recordEvidence(pool, evidence(id('ev'), 'bank_statement', source), null);
+    await recordEvidence(pool, evidence(id('ev'), 'bank_statement', source), null, VAULT);
     await recordBankLines(pool, [
       statementLine(id('bank-odd'), 313_131n, 'UNKNOWN CREDIT', id('ev')),
     ]);
@@ -381,7 +393,7 @@ describe('the exception queue', { skip: DATABASE_URL ? false : 'set DATABASE_URL
   test('a returned payout is booked back and queued', async () => {
     const { source, id, policy } = scenario();
     await promise(source, id('pay-1'), 2_400_000n);
-    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null);
+    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null, VAULT);
     await recordPayouts(pool, [
       payout(source, id('PO-returned'), 2_400_000n, [deduction('fee', 36_000n)], id('ev')),
     ]);
@@ -438,7 +450,7 @@ describe('the exception queue', { skip: DATABASE_URL ? false : 'set DATABASE_URL
   test('a second credit for a banked payout is queued as a duplicate', async () => {
     const { source, id, policy } = scenario();
     await promise(source, id('pay-1'), 3_300_000n);
-    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null);
+    await recordEvidence(pool, evidence(id('ev'), 'psp_settlement', source), null, VAULT);
     await recordPayouts(pool, [
       payout(source, id('PO-twice'), 3_300_000n, [deduction('fee', 49_500n)], id('ev')),
     ]);
@@ -469,7 +481,7 @@ describe('the exception queue', { skip: DATABASE_URL ? false : 'set DATABASE_URL
   test('the queue puts the alarming things first', async () => {
     const { source, id, policy } = scenario();
     await promise(source, id('pay-late'), 111_111n);
-    await recordEvidence(pool, evidence(id('ev'), 'bank_statement', source), null);
+    await recordEvidence(pool, evidence(id('ev'), 'bank_statement', source), null, VAULT);
     await recordBankLines(pool, [
       statementLine(id('bank-mystery'), 222_222n, 'NO IDEA', id('ev')),
     ]);

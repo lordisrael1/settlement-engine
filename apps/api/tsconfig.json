@@ -12,6 +12,7 @@
     { "path": "../../packages/ingest" },
     { "path": "../../packages/reconciler" },
     { "path": "../../packages/policy" },
-    { "path": "../../packages/inbox" }
+    { "path": "../../packages/inbox" },
+    { "path": "../../packages/protect" }
   ]
 }

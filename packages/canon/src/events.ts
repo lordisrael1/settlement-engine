@@ -83,6 +83,20 @@ export const DOMAIN_EVENT_TYPES = [
   // ── The queue ─────────────────────────────────────────────────────────────
   'ExceptionRaised',
   'ExceptionResolved',
+
+  // ── Retention ─────────────────────────────────────────────────────────────
+  /**
+   * Bytes we held were destroyed on purpose.
+   *
+   * The one event that records something leaving the system rather than entering it, and
+   * the reason it is in the vocabulary at all: a deletion nobody can see is
+   * indistinguishable from a deletion nobody performed. Both halves of the retention path
+   * append it — the original payload replaced by a redacted copy, and the redacted copy
+   * itself purged at the end of its life — with `detail.from` and `detail.to` saying
+   * which. The evidence row, its hash and its lineage are never touched, so the narrative
+   * keeps a record of a document whose bytes are gone (ADR-0065).
+   */
+  'EvidencePurged',
 ] as const;
 
 export type DomainEventType = (typeof DOMAIN_EVENT_TYPES)[number];

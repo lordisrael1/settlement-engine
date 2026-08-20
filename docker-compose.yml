@@ -11,9 +11,11 @@ services:
       POSTGRES_PASSWORD: recon
       POSTGRES_DB: recon
     ports:
-      # Exposed for local inspection with psql. Remove for any deployment where the
-      # database should only be reachable from the service.
-      - '5432:5432'
+      # Bound to the loopback interface only. It was published on 0.0.0.0 with a comment
+      # saying to remove that before deploying; with encrypted evidence, an access log and
+      # a retention schedule in this database, that line is an incident rather than a
+      # convenience, and a comment is not a control (ADR-0063).
+      - '127.0.0.1:5432:5432'
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -34,9 +36,18 @@ services:
     environment:
       DATABASE_URL: postgres://recon:recon@postgres:5432/recon
       # Development values. A deployment supplies these from its own secret store, and
-      # nothing here is baked into the image. The service refuses to start without an API
-      # key rather than serving the management endpoints unauthenticated.
-      RECON_API_KEY: local-dev-key-0123456789
+      # nothing here is baked into the image. The service refuses to start without keys
+      # rather than serving the management endpoints unauthenticated.
+      #
+      # "principal:secret:grant|grant" — every key belongs to a named principal, because
+      # the evidence endpoints record who read what (ADR-0066).
+      RECON_API_KEYS: >-
+        amaka@example.com:local-dev-key-0123456789,
+        auditor@example.com:local-dev-audit-0123456789:evidence.raw|evidence.export
+      # The root key evidence is sealed under. Obviously a development value; generate a
+      # real one with `openssl rand -base64 32` and keep it in a secret store, or replace
+      # the key ring with a KMS adapter (ADR-0063).
+      RECON_EVIDENCE_KEY: k1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
       # The secret each provider signs its deliveries with. A source with no secret gets a
       # 503 and stores nothing. These two match the demo's fixtures.
       RECON_WEBHOOK_SECRET_PAYSTACK: sk_test_demo_secret
@@ -57,6 +68,8 @@ services:
   #
   #   docker compose run --rm cli node apps/pipeline/dist/main.js demo
   #   docker compose run --rm cli node apps/pipeline/dist/main.js replay --rebuild
+  #   docker compose run --rm cli node apps/pipeline/dist/main.js evidence-retention
+  #   docker compose run --rm cli node apps/pipeline/dist/main.js evidence-retention --apply
   cli:
     build: .
     profiles: ['cli']
@@ -67,6 +80,10 @@ services:
       DATABASE_URL: postgres://recon:recon@postgres:5432/recon
       RECON_MERCHANT: demo-merchant
       RECON_BANK_ACCOUNT: gtb-3011
+      # The CLI ingests files and runs the retention command, so it needs the same key ring
+      # the service has — and, on a real deployment, a narrower one: it needs Decrypt, and
+      # nothing gives it the power to destroy a key.
+      RECON_EVIDENCE_KEY: k1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
     command: ['node', 'apps/pipeline/dist/main.js', 'demo']
 
 volumes:

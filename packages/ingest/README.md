@@ -3,8 +3,8 @@
 The anti-corruption boundary. Provider bytes in, `@recon/canon` types out, so the core never
 sees a foreign shape.
 
-**Depends on:** `@recon/canon`, `@pay-normalize/*`. **Imported by:** `@recon/policy`,
-`apps/*`.
+**Depends on:** `@recon/canon`, `@recon/protect`, `@pay-normalize/*`. **Imported by:**
+`@recon/policy`, `apps/*`.
 
 It does not depend on `@recon/ledger-core` and owns no database. Ingest's job ends when it
 has produced a clean canonical event; deciding what to do with that event, and remembering
@@ -23,6 +23,7 @@ rather than reimplemented.
 | Per-provider timezone rules and status vocabularies | The expected settlement deadline per source |
 | `STATUS_RANK`, making out-of-order delivery safe | The expected fee per source |
 | Row-isolated settlement parsing that never throws on bad data | Deduplication as a pure function |
+| — | Refusing a payload that carries card data, before anything downstream sees it |
 
 A stateless normalisation library has no opinion about when money should have arrived or
 what it should have cost. Those two facts are what reconciliation runs on, and they are this
@@ -83,3 +84,17 @@ each land on a different branch of the card:
 
 When a rate card drifts it shows up as a rising `FEE_VARIANCE` count rather than a wrong
 balance, because the fee actually charged always wins.
+
+## It refuses card data
+
+A boundary that translates foreign payloads is also the boundary that decides what may enter
+at all. `ingestWebhook` rejects a delivery carrying a Luhn-valid card number under a real
+issuer prefix, or a field named as sensitive authentication data, and `ingestSettlement` and
+`ingestBankStatement` throw before an evidence record exists — so there is never a row
+anybody has to go and delete.
+
+The scan itself lives in `@recon/protect`, because the service performs it again on the
+request path, before the delivery is stored at all. That is the layer that can actually keep
+the bytes out of the database; this one is the second line, for the paths that reach a parser
+without passing the door
+([ADR-0066](../../docs/adr/0066-pci-scope-and-evidence-access.md)).

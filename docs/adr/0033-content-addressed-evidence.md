@@ -4,7 +4,7 @@ Date: 2026-08-16
 
 ## Status
 
-Accepted
+Accepted — the retention half superseded by [ADR-0065](0065-evidence-retention-schedule.md)
 
 ## Context
 
@@ -31,3 +31,6 @@ resolved reference.
   never indistinguishable from a reference the bank supplied.
 - Storage, retention and sensitive-data controls are now this system's problem.
   `evidence.raw` is nullable so a deployment can truncate on a schedule and keep the hash.
+  **This last consequence was wrong and is superseded by ADR-0065.** The append-only trigger
+  on `evidence` refuses that `UPDATE`, so the path described here never existed; the bytes
+  now live in a separate, encrypted, expiring `evidence_blobs`, and the hash stays here.

@@ -19,7 +19,13 @@ import {
   type Scenario,
 } from '@recon/simulator';
 
-import { calendarFor, drive, SIMULATED_SECRETS, type FinalState } from './chaos.js';
+import {
+  calendarFor,
+  drive,
+  SIMULATED_SECRETS,
+  SIMULATED_VAULT,
+  type FinalState,
+} from './chaos.js';
 
 /**
  * The adversarial end-to-end suite.
@@ -107,6 +113,7 @@ describe(
 
         const state = await drive(pool, scenario, arrivals(scenario), {
           secrets: SIMULATED_SECRETS,
+          vault: SIMULATED_VAULT,
         });
 
         assert.deepEqual(state.failures, [], `seed ${seed}: the ledger refused a booking`);
@@ -144,6 +151,7 @@ describe(
 
       const state = await drive(pool, scenario, arrivals(scenario), {
         secrets: SIMULATED_SECRETS,
+        vault: SIMULATED_VAULT,
       });
 
       assert.ok(scenario.truth.stragglerPayouts.length > 0, 'the scenario planted no straggler');
@@ -170,7 +178,7 @@ describe(
       const scenario = scenarioFor(SEEDS[0]!);
       const pool = await freshLedger();
 
-      await drive(pool, scenario, arrivals(scenario), { secrets: SIMULATED_SECRETS });
+      await drive(pool, scenario, arrivals(scenario), { secrets: SIMULATED_SECRETS, vault: SIMULATED_VAULT });
 
       const expected = new Map(
         scenario.truth.pricedBy.map((entry) => [entry.reference, entry.contractId]),
@@ -252,7 +260,7 @@ describe(
 
       for (const { label, order } of orders) {
         const pool = await freshLedger();
-        const state = await drive(pool, scenario, order, { secrets: SIMULATED_SECRETS });
+        const state = await drive(pool, scenario, order, { secrets: SIMULATED_SECRETS, vault: SIMULATED_VAULT });
 
         assert.deepEqual(state.failures, [], `${label}: the ledger refused a booking`);
         assert.ok(state.cacheAgrees, `${label}: the balance cache drifted`);
@@ -294,6 +302,7 @@ describe(
 
       await drive(pool, scenario, [...arrivals(scenario)].reverse(), {
         secrets: SIMULATED_SECRETS,
+        vault: SIMULATED_VAULT,
       });
 
       const everRaised = await openExceptions(pool, { states: ['open', 'acknowledged', 'resolved'] });
@@ -333,8 +342,8 @@ describe(
       const pool = await freshLedger();
       const order = arrivals(scenario);
 
-      const once = await drive(pool, scenario, order, { secrets: SIMULATED_SECRETS });
-      const twice = await drive(pool, scenario, order, { secrets: SIMULATED_SECRETS });
+      const once = await drive(pool, scenario, order, { secrets: SIMULATED_SECRETS, vault: SIMULATED_VAULT });
+      const twice = await drive(pool, scenario, order, { secrets: SIMULATED_SECRETS, vault: SIMULATED_VAULT });
 
       assert.deepEqual(twice.failures, [], 'the second pass refused a booking');
       assert.deepEqual(twice.balances, once.balances, 'the second pass moved money');
@@ -354,7 +363,7 @@ describe(
       const pool = await freshLedger();
       const order = arrivals(scenario);
 
-      const once = await drive(pool, scenario, order, { secrets: SIMULATED_SECRETS });
+      const once = await drive(pool, scenario, order, { secrets: SIMULATED_SECRETS, vault: SIMULATED_VAULT });
 
       // The same rows, with the pagination metadata a second export would carry. Different
       // hash, same payouts.
@@ -383,7 +392,7 @@ describe(
         };
       });
 
-      const twice = await drive(pool, scenario, reExported, { secrets: SIMULATED_SECRETS });
+      const twice = await drive(pool, scenario, reExported, { secrets: SIMULATED_SECRETS, vault: SIMULATED_VAULT });
 
       assert.deepEqual(twice.failures, [], 'the re-export refused a booking');
       assert.deepEqual(twice.balances, once.balances, 'the re-export booked the payouts again');
@@ -488,6 +497,7 @@ describe(
 
       const state = await drive(pool, scenario, arrivals(scenario), {
         secrets: SIMULATED_SECRETS,
+        vault: SIMULATED_VAULT,
       });
 
       assert.deepEqual(state.failures, [], 'the ledger refused a booking');

@@ -2,6 +2,7 @@ import { toRawBody } from '@pay-normalize/core';
 
 import type { CanonicalPayment, SourceId } from '@recon/canon';
 import { idempotencyKey } from '@recon/canon';
+import { scanForCardData } from '@recon/protect';
 
 import { toMoney } from './kobo.js';
 import { sourceProfile } from './sources.js';
@@ -64,6 +65,25 @@ export function verifyWebhook(input: WebhookIngestInput): boolean {
  */
 export function ingestWebhook(input: WebhookIngestInput): WebhookIngestResult {
   if (!verifyWebhook(input)) return { kind: 'unverified' };
+
+  // Authentic, and still refused if it carries a card number or sensitive authentication
+  // data. Checked after verification, because scanning bytes any stranger can choose is
+  // work done on a stranger's behalf — and before parsing, because a payload we must not
+  // hold is not made acceptable by being well-formed.
+  //
+  // `rejected` rather than `ignored`: this is a bug in a provider adapter or a payload
+  // shape that changed, it must never be retried, and it must reach a person. The service
+  // refuses the same delivery at the door, before it is stored at all (ADR-0066) — this
+  // is the second layer, for the paths that reach a parser without passing the door.
+  const cardData = scanForCardData(input.rawBody);
+  if (cardData) {
+    return {
+      kind: 'rejected',
+      reason:
+        `refused: ${cardData.detail}. This system holds tokens and approved truncations ` +
+        `only, and nothing downstream has been given these bytes.`,
+    };
+  }
 
   const { connector } = sourceProfile(input.source);
   const parsed = connector.parseWebhook(toRawBody(input.rawBody));

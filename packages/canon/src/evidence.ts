@@ -44,12 +44,12 @@ export interface Evidence {
   /**
    * Where the bytes live outside this database — an object-store URI, a vault path.
    *
-   * Nullable because a small deployment keeps everything in `evidence.raw` and needs no
+   * Nullable because a small deployment keeps the bytes in `evidence_blobs` and needs no
    * second copy. It exists because a large one cannot: statements run to hundreds of
-   * megabytes, retention policy says delete the payload and keep the record, and an
-   * encrypted bucket is where a real one goes. When `raw` is eventually truncated, this is
-   * the only thing standing between a hash and an unanswerable question — so it is a
-   * *locator*, recorded at ingest, and never a promise that the object is still there.
+   * megabytes, and an encrypted bucket is where a real one goes. When the blob is purged at
+   * the end of its retention (ADR-0065), this is the only thing standing between a hash and
+   * an unanswerable question — so it is a *locator*, recorded at ingest, and never a promise
+   * that the object is still there.
    */
   readonly storageLocation: string | null;
   /** Who or what put it in front of us: an operator's id, a cron job, an API client. */
@@ -169,6 +169,15 @@ export interface ApprovalPolicy {
   readonly approvalThreshold: Money;
   /** Any resolution that posts a compensating ledger entry needs an approver. */
   readonly approveAnyBooking: boolean;
+  /**
+   * Taking the *original* bytes of a document out of the system needs an approver.
+   *
+   * The same control, pointed at the other way value leaves: a resolution moves money out
+   * of the books, an original export moves a customer's name and email out of the estate.
+   * A redacted export is not covered, because a redacted export is the fields the matcher
+   * reads and nothing a person could be identified by (ADR-0066).
+   */
+  readonly approveOriginalExport: boolean;
 }
 
 /**
@@ -181,6 +190,7 @@ export const DEFAULT_APPROVAL_POLICY: ApprovalPolicy = {
   actionsRequiringApproval: ['write_off', 'reclassify', 'clear_phantom', 'reallocate'],
   approvalThreshold: { kobo: 5_000_000n, currency: 'NGN' },
   approveAnyBooking: true,
+  approveOriginalExport: true,
 };
 
 export function approvalRequired(
@@ -260,4 +270,168 @@ export const RESOLUTION_FORBIDDEN_ACCOUNTS: readonly AccountId[] = ['bank_accoun
 export interface RecordedResolution {
   readonly resolution: Resolution;
   readonly bookedTransactionId: TransactionId | null;
+}
+
+// ── Retention and access ────────────────────────────────────────────────────
+
+/**
+ * Which version of a document's bytes is being held.
+ *
+ * `original` is what arrived, byte for byte — the only version the delivery's signature
+ * can be recomputed over, and the only one that can contain a customer's name, email or
+ * card metadata. `redacted` is the keep-list copy: the fields reconciliation actually reads
+ * and nothing else.
+ *
+ * The distinction is recorded rather than inferred because the answer to "can you prove
+ * these are the bytes the provider sent?" changes with it, and a system that cannot say
+ * which it holds has to answer "no" for both.
+ */
+export type EvidenceContent = 'original' | 'redacted';
+
+/**
+ * How long each version of a document's bytes is kept.
+ *
+ * Policy, like `ApprovalPolicy` above, and here for the same reason: the reconciler, the
+ * retention command and the API must apply one schedule rather than three similar ones. A
+ * deployment sets its own figures — the defaults below are a starting position, not a legal
+ * opinion, and the redacted horizon in particular is the one a Nigerian deployment confirms
+ * with counsel against CBN and FIRS record-keeping obligations.
+ */
+export interface RetentionSchedule {
+  /**
+   * How long the bytes exactly as they arrived are kept, before a redacted copy replaces
+   * them.
+   *
+   * This is the dispute window and nothing more. Past it the signature can no longer be
+   * recomputed, which matters only to a dispute — "these exact bytes arrived, hashed to
+   * this id, and the signature verified at this time" stays provable forever from the
+   * evidence row itself (ADR-0064).
+   */
+  readonly originalDays: number;
+  /** How long the redacted copy is kept. A financial record-keeping figure, not a technical one. */
+  readonly redactedDays: number;
+  /** How long an inbound delivery's original payload sits in the inbox before it is redacted. */
+  readonly inboxOriginalDays: number;
+}
+
+/**
+ * A starting schedule: thirty days of dispute window, six years of record.
+ *
+ * Thirty days covers every provider dispute window we have seen and is comfortably longer
+ * than any chargeback notification lag. Six years is the shortest figure that satisfies the
+ * ordinary Nigerian financial record-keeping expectation; deployments that answer to a
+ * longer one raise it, and none should lower it without an opinion in writing.
+ */
+export const DEFAULT_RETENTION: RetentionSchedule = {
+  originalDays: 30,
+  redactedDays: 6 * 365 + 2,
+  inboxOriginalDays: 30,
+};
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Which kinds of evidence can be reduced to a keep-list copy, and which are the record
+ * itself.
+ *
+ * A webhook payload is a *notification* about money. Reconciliation reads six fields of it,
+ * and the rest — a customer's name, email, IP address and card metadata — is incidental to
+ * transport. That is reducible, and reducing it is most of this system's data-protection
+ * position.
+ *
+ * A settlement export and a bank statement are not. They are the financial record: the
+ * thing we are obliged to keep, the thing an auditor asks to see, and the thing a
+ * disagreement about money is settled against. A bank narration containing a counterparty's
+ * name is evidence rather than an accident, and dropping it to satisfy minimisation would
+ * destroy the record in order to protect it. They are retained whole, encrypted, and read
+ * only through a logged and separately authorised path (ADR-0065).
+ */
+export function reducible(kind: EvidenceKind): boolean {
+  return kind === 'webhook';
+}
+
+/**
+ * When this version of these bytes stops being ours to hold.
+ *
+ * Computed once, at the moment the bytes are written, and stored — so a schedule changed
+ * next quarter does not silently re-date everything already held, in either direction.
+ */
+export function purgeAfter(
+  schedule: RetentionSchedule,
+  kind: EvidenceKind,
+  content: EvidenceContent,
+  receivedAt: Date,
+): Date {
+  const short = reducible(kind) && content === 'original';
+  const days = short ? schedule.originalDays : schedule.redactedDays;
+  return new Date(receivedAt.getTime() + days * DAY_MS);
+}
+
+/**
+ * What somebody did with a piece of evidence.
+ *
+ * `read_metadata` is the cheap, ordinary case — who uploaded it, when, which parser read
+ * it — and is separated from `read_raw` deliberately: the metadata answers most audit
+ * questions and carries no personal data, so the two are different endpoints with
+ * different grants and different alert thresholds (ADR-0066).
+ */
+export type EvidenceAccessAction = 'read_metadata' | 'read_raw' | 'export' | 'purge';
+
+/**
+ * A request to take a copy of a document out of the system.
+ *
+ * The one operation that ends with evidence somewhere this system cannot see, which is why
+ * it is maker-checked rather than merely authorised. `content` is the whole of the risk:
+ * a redacted export carries the fields the matcher reads, and an original export carries
+ * whatever the provider sent — including, for a card charge, a customer's name and email.
+ */
+export interface EvidenceExportRequest {
+  readonly evidenceId: string;
+  readonly content: EvidenceContent;
+  /** Why. Recorded verbatim in the access log, because "who" without "why" is a name. */
+  readonly reason: string;
+  /** The verified principal asking. Not a claim in a header (ADR-0066). */
+  readonly requestedBy: string;
+  readonly requestedAt: Date;
+  readonly approvedBy: string | null;
+  readonly approvedAt: Date | null;
+}
+
+/**
+ * Why this export may not be issued, or `null` if it may.
+ *
+ * Deliberately the same shape and the same rules as `approvalFailure` above — returned
+ * rather than thrown, self-approval refused by name, an approval complete or absent — and
+ * deliberately reading its policy from the same `ApprovalPolicy` a resolution does. A
+ * second approval mechanism with its own threshold and its own idea of what a second pair
+ * of eyes means is two controls to keep in step and one to quietly diverge (ADR-0042).
+ */
+export function exportApprovalFailure(
+  policy: ApprovalPolicy,
+  request: EvidenceExportRequest,
+): string | null {
+  const approved = request.approvedBy !== null;
+
+  if (approved !== (request.approvedAt !== null)) {
+    return 'An approval is either complete or absent: approvedBy and approvedAt must both ' +
+      'be present or both be null. A half-recorded approval looks like oversight happened.';
+  }
+
+  if (approved && request.approvedBy === request.requestedBy) {
+    return `"${request.requestedBy}" cannot approve their own export. Maker-checker means a ` +
+      `second person looked, and one person named twice is one person.`;
+  }
+
+  if (request.content === 'original' && policy.approveOriginalExport && !approved) {
+    return 'Exporting the original bytes takes a provider payload — customer name, email ' +
+      'and card metadata included — outside this system, and needs a second named ' +
+      'approver. A redacted export does not.';
+  }
+
+  if (request.reason.trim() === '') {
+    return 'An export states why it is being taken. An access record with a name and no ' +
+      'reason answers half the question an auditor asks.';
+  }
+
+  return null;
 }

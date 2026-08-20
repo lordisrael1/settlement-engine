@@ -8,7 +8,12 @@ import {
   UnbookableResolutionError,
   UnknownTransactionError,
 } from '@recon/ledger-core';
-import { UnapprovedResolutionError } from '@recon/reconciler';
+import { CardDataRefused } from '@recon/protect';
+import {
+  EvidenceUnavailableError,
+  UnapprovedExportError,
+  UnapprovedResolutionError,
+} from '@recon/reconciler';
 
 /**
  * Which HTTP status a domain refusal deserves — the whole of the translation this layer is
@@ -40,9 +45,19 @@ export function statusFor(error: unknown): number | null {
   // The lifecycle said no: a transition that history does not allow.
   if (error instanceof InvalidStateTransitionError) return 409;
 
+  // The document existed and its bytes did not survive their retention. 410 rather than
+  // 404, because "it was destroyed on schedule" and "we have never heard of it" are
+  // different facts and only one of them means somebody should go looking (ADR-0065).
+  if (error instanceof EvidenceUnavailableError) return 410;
+
   // Well-formed, understood, and refused on the merits. Every one of these carries a
   // message that names the money and the rule.
   if (error instanceof UnapprovedResolutionError) return 422;
+  if (error instanceof UnapprovedExportError) return 422;
+  // Authentic, well-formed, and carrying something this system may not hold. Nothing was
+  // stored, and the message says so — an operator whose upload is refused needs to know
+  // whether they must now go and delete something (ADR-0066).
+  if (error instanceof CardDataRefused) return 422;
   if (error instanceof UnbookableResolutionError) return 422;
   if (error instanceof UnbookablePaymentError) return 422;
   if (error instanceof ImplausibleSettlementError) return 422;

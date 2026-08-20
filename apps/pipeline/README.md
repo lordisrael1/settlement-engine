@@ -12,7 +12,13 @@ service joined it rather than replacing it — a service for traffic, a CLI for 
 over one set of libraries ([ADR-0022](../../docs/adr/0022-a-cli-deployable-alongside-the-service.md)).
 
 The CLI remains the right tool for what a service is the wrong tool for: a scheduled
-`replay`, a one-off ingest of a file on somebody's laptop, the demo, and `simulate`.
+`replay`, a scheduled `evidence-retention`, a one-off ingest of a file on somebody's laptop,
+the demo, and `simulate`.
+
+`evidence-retention` is here rather than inside the service for the same reason `replay` is,
+and one more: a deletion of financial evidence should be something somebody scheduled, with
+an output somebody reads, not a background thread nobody watches
+([ADR-0065](../../docs/adr/0065-evidence-retention-schedule.md)).
 
 ## Commands
 
@@ -29,6 +35,10 @@ The CLI remains the right tool for what a service is the wrong tool for: a sched
     ingest-bank <file> [bank-id]       a bank statement; the only evidence that books cash
     reconcile                          allocation, then bank confirmation
     exceptions                         the queue, worst first, with rejected candidates
+    evidence-retention [--apply]       move every document to the state its retention
+                                       schedule says it should be in; a dry run without
+                                       --apply, because a command that destroys financial
+                                       evidence should have to be asked twice
 
 Run any of them against the composed system:
 
