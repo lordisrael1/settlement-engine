@@ -22,7 +22,7 @@ import {
 import { calendarFor, drive, SIMULATED_SECRETS, type FinalState } from './chaos.js';
 
 /**
- * Phase 8: the adversarial suite.
+ * The adversarial end-to-end suite.
  *
  * Everywhere else, the tests state a case and check the answer. Here the *case* is
  * generated — a renegotiated fee contract with payments on both sides of it, a reversal on a
@@ -64,8 +64,7 @@ describe(
      *
      * These tests assert *absolute* balances — "the books are exactly here" — which is only
      * a meaningful claim about a ledger nothing else is writing to. Sharing `public` with
-     * the property suite would turn each assertion into a measurement of the other suite's
-     * weather.
+     * the property suite would make each assertion depend on what that suite had written.
      */
     const freshLedger = async (): Promise<Pool> => {
       const schema = `chaos_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
@@ -90,11 +89,11 @@ describe(
       await Promise.all(pools.map((pool) => pool.end()));
     });
 
-    // ── The exit criterion ────────────────────────────────────────────────────
+    // ── The central claim ──────────────────────────────────────────────────────
 
     /**
-     * Phase 8's exit criterion, stated as a test: the simulator's one phantom credit is the
-     * only item a human is ever shown.
+     * The central claim, stated as a test: the simulator's one phantom credit is the only
+     * item a human is ever shown.
      *
      * The balance assertion is what stops this being a weaker claim than it sounds. A queue
      * can be empty because everything was explained, or because everything was quietly
@@ -322,7 +321,7 @@ describe(
     // ── Duplicates ────────────────────────────────────────────────────────────
 
     /**
-     * Law 4, across every rail at once.
+     * Idempotency, across every rail at once.
      *
      * Providers retry until you answer 200, operators upload the same export twice, and a
      * bank statement for an overlapping period contains rows you already have. Duplicates

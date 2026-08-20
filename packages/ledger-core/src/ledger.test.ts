@@ -204,11 +204,12 @@ describe('the ledger', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run' 
   });
 
   /**
-   * Phase 1's exit criterion.
+   * The ledger's core property.
    *
    * Across many random *valid* transactions, two things must hold without exception:
    * every account's cached balance equals the balance recomputed from its entries
-   * (Law 6), and every entry ever written still sums to zero (Law 1 at the scale of the
+   * (cache equals recompute), and every entry ever written still sums to zero (conservation
+   * across the
    * whole ledger). Random amounts, random accounts, random shapes — the invariants do
    * not get to depend on the data being convenient.
    */

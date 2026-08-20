@@ -9,7 +9,7 @@ export class LedgerError extends Error {
 }
 
 /**
- * Law 1. Thrown before the write is attempted, so the caller gets a message naming the
+ * Balance-zero. Thrown before the write is attempted, so the caller gets a message naming the
  * amount that went missing rather than a Postgres error code. The database enforces the
  * same rule independently at COMMIT — this check is for humans, that one is for safety.
  */

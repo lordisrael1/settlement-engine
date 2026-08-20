@@ -200,12 +200,12 @@ describe('the exception queue', { skip: DATABASE_URL ? false : 'set DATABASE_URL
       (item) => item.subjectId === subjectId,
     );
 
-  // ── The exit criterion ────────────────────────────────────────────────────
+  // ── The queue lifecycle ───────────────────────────────────────────────────
 
   /**
-   * The bible's own "done when", in one test. A straggler sits inside its window and
-   * troubles nobody; past the window it escalates; and when the file finally arrives it
-   * clears itself with no human involved.
+   * The whole lifecycle in one test. A straggler sits inside its window and troubles
+   * nobody; past the window it escalates; and when the file finally arrives it clears
+   * itself with no human involved.
    */
   test('a straggler waits, escalates, then clears itself when the evidence arrives', async () => {
     const { source, id, policy } = scenario();
@@ -256,9 +256,9 @@ describe('the exception queue', { skip: DATABASE_URL ? false : 'set DATABASE_URL
   });
 
   /**
-   * A phantom credit reaches a human immediately with the working attached. The bible asks
-   * for "the candidate explanations the matcher considered and rejected", and this is why:
-   * without them the entry is a mystery, with them it is a decision.
+   * A phantom credit reaches a human immediately with the working attached: the candidate
+   * explanations the matcher considered and rejected. Without them the entry is a mystery;
+   * with them it is a decision.
    */
   test('a phantom credit is queued at once, carrying what the matcher rejected', async () => {
     const { source, id, policy } = scenario();
@@ -335,7 +335,7 @@ describe('the exception queue', { skip: DATABASE_URL ? false : 'set DATABASE_URL
     assert.deepEqual(await queueFor(id('bank-stray')), []);
   });
 
-  /** Law 2, reaching the judgements. Nothing in the trail may be edited or deleted. */
+  /** Append-only, reaching the judgements: nothing in the trail may be edited or deleted. */
   test('the exception trail is append-only', async () => {
     const { source, id, policy } = scenario();
     await recordEvidence(pool, evidence(id('ev'), 'bank_statement', source), null);

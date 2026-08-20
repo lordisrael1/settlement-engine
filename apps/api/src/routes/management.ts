@@ -28,10 +28,10 @@ import type { Services } from '../services.js';
  * The read contract, and the one write a human makes.
  *
  * Every handler below is the same three lines — parse the request, call one package
- * function, serialise the answer — and that sameness is the phase's exit criterion, not an
- * accident of scope. If a route here starts deciding *which* exceptions matter, *what* a
- * shortfall means, or *whether* a resolution needs approving, a Law has moved into the
- * transport layer and the packages have stopped being the authority on their own subjects.
+ * function, serialise the answer — and that sameness is deliberate. If a route here starts
+ * deciding *which* exceptions matter, *what* a shortfall means, or *whether* a resolution
+ * needs approving, domain logic has moved into the transport layer and the packages have
+ * stopped being the authority on their own subjects.
  *
  * The one place that could have gone wrong is `POST /exceptions/:key/resolve`, because
  * resolving is genuinely three writes: the decision, the compensating entry, and the
@@ -67,7 +67,7 @@ export const managementRoutes: FastifyPluginCallback<Services> = (app, services,
   //
   // A run is bounded by `reconcileLimit` on purpose. Subset-sum batching over an unbounded
   // set of open promises is how a matcher stops returning; the limit is the difference
-  // between a run that takes a second and one that never finishes (D-053).
+  // between a run that takes a second and one that never finishes (ADR-0053).
   app.post('/reconcile/runs', async (_request, reply) => {
     const run = await reconcile(pool, {
       asOf: now(),
@@ -120,7 +120,7 @@ export const managementRoutes: FastifyPluginCallback<Services> = (app, services,
       exception: asException(item),
       // Nothing here was ever overwritten, so the history is the whole story: raised on
       // Tuesday, acknowledged by a named person on Wednesday, resolved by evidence on
-      // Thursday (D-043).
+      // Thursday (ADR-0043).
       history: await exceptionHistory(pool, request.params.key),
     };
   });
@@ -185,7 +185,7 @@ interface ResolveBody {
   readonly resolvedBy: string;
   readonly approvedBy?: string;
   readonly evidenceId?: string;
-  /** Kobo, as a decimal string. Never a JSON number — a JSON number is a double (Law 3). */
+  /** Kobo, as a decimal string. Never a JSON number: a JSON number is a double. */
   readonly amountKobo?: string;
   readonly entries?: readonly { readonly accountId: string; readonly kobo: string }[];
 }

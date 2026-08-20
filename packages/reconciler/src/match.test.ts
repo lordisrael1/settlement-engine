@@ -531,7 +531,7 @@ test('debits never confirm anything', () => {
 // ── The laws ────────────────────────────────────────────────────────────────
 
 /**
- * Law 5. The partition is a function of the inputs, not of the order they arrived in.
+ * Determinism. The partition is a function of the inputs, not of the order they arrived in.
  * Shuffle both sides and nothing may change — otherwise a replay proves nothing.
  */
 test('the same inputs produce the same partition, whatever the input order', () => {
@@ -553,7 +553,8 @@ test('the same inputs produce the same partition, whatever the input order', () 
 });
 
 /**
- * Law 7, as a test. The matcher is handed a calendar, a fee model and an allowance, and is
+ * The canonical boundary, as a test. The matcher is handed a calendar, a fee model and an
+ * allowance, and is
  * never told which source produced anything. Rename every source and the partition is
  * identical — because there is no source name in there to branch on.
  */
@@ -635,7 +636,7 @@ test('a batch fee is split across the payments it was charged on', () => {
 /**
  * The kobo that will not divide has to go somewhere, and "wherever the map iterated first"
  * is not a decision anybody can reproduce. Largest remainder decides, and the transaction id
- * breaks the tie — so the same inputs always hand the same kobo to the same payment (Law 5).
+ * breaks the tie, so the same inputs always hand the same kobo to the same payment.
  */
 test('an indivisible kobo is given away by a rule, not by iteration order', () => {
   const forward = allocateWith(

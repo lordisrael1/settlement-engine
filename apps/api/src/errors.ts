@@ -34,7 +34,7 @@ export function statusFor(error: unknown): number | null {
 
   // Honest unsupported. Paystack's settlement export has no fixture-verified column
   // layout, so there is no parser — and inventing one is how you get a parser that looks
-  // right and is quietly wrong (D-025). "Not implemented" is exactly what that is.
+  // right and is quietly wrong (ADR-0025). "Not implemented" is exactly what that is.
   if (error instanceof NoSettlementAdapterError) return 501;
 
   // The lifecycle said no: a transition that history does not allow.

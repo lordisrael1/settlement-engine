@@ -14,7 +14,7 @@ export interface Config {
 
   /**
    * The management credential. Webhooks do **not** use it — a PSP has no key of ours and
-   * authenticates by signing the bytes it sends (D-052).
+   * authenticates by signing the bytes it sends (ADR-0052).
    */
   readonly apiKey: string;
 
@@ -28,7 +28,7 @@ export interface Config {
    * The shared secret a source signs its deliveries with, or `null` if we hold none.
    *
    * A lookup keyed by data, not a branch on a name: adding a source adds an environment
-   * variable and nothing else (Law 7).
+   * variable and nothing else (the canonical boundary).
    */
   readonly webhookSecret: (source: SourceId) => string | null;
 
@@ -49,7 +49,7 @@ export interface Config {
     readonly uploadBytes: number;
   };
 
-  /** How many records one reconciliation run may consider. Bounded on purpose (D-053). */
+  /** How many records one reconciliation run may consider. Bounded on purpose (ADR-0053). */
   readonly reconcileLimit: number;
 }
 

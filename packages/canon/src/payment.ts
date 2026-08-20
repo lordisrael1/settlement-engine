@@ -20,7 +20,7 @@ export type PaymentStatus = 'PENDING' | 'FAILED' | 'SUCCESSFUL' | 'REVERSED';
 /**
  * Webhooks arrive out of order. A status update only takes effect if it ranks strictly
  * higher than the status already recorded, which makes the outcome independent of
- * delivery order (Law 5). Equal rank is a no-op, so redelivery changes nothing (Law 4).
+ * delivery order (determinism). Equal rank is a no-op, so redelivery changes nothing (idempotency).
  *
  * These values mirror `STATUS_RANK` in `@pay-normalize/core`. That library's ordering is
  * the production-tested one and wins any disagreement; this copy exists so the ledger

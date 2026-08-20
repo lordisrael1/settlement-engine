@@ -12,8 +12,8 @@
 --
 --   **The identity is the bytes.** `delivery_id` is SHA-256 over the source and the raw
 --   body, so a redelivery — which providers guarantee, not merely risk — collides on the
---   primary key rather than on anybody remembering (Law 4, at the door). It is derivable by
---   anyone holding the same bytes, exactly as an evidence id is (D-033), and it needs no
+--   primary key rather than on anybody remembering (idempotency, at the door). It is derivable by
+--   anyone holding the same bytes, exactly as an evidence id is (ADR-0033), and it needs no
 --   parsing to compute: at the moment of acceptance we have verified the signature and
 --   deliberately not yet run a parser over a stranger's bytes.
 --

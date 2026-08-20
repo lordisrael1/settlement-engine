@@ -14,8 +14,8 @@ import { heading, line } from './report.js';
  *
  * Every number this command prints is an **absolute** claim — "the books land exactly
  * here" — and that is only a statement about a ledger nothing else has written to. Run
- * against the shared schema it would be measuring the demo's weather, and two different
- * seeds could not coexist at all: their fee contracts occupy the same scope, and the
+ * against the shared schema it would measure whatever else had written there, and two
+ * different seeds could not coexist at all: their fee contracts occupy the same scope, and the
  * exclusion constraint that forbids two contracts in force at once would refuse the
  * second one. Correctly — the constraint is right and the command was wrong.
  *
@@ -27,8 +27,8 @@ async function ledgerFor(seed: number): Promise<{ pool: Pool; schema: string }> 
   const schema = `simulator_seed_${seed}`;
   const bootstrap = createPool();
   try {
-    // Dropped and rebuilt, so a second run of the same seed is the same narrative rather
-    // than the same narrative on top of yesterday's. Safe because this command owns every
+    // Dropped and rebuilt, so a second run of the same seed is the same scenario rather
+    // than the same scenario on top of the previous run's. Safe because this command owns every
     // schema of this name and creates nothing anywhere else.
     await bootstrap.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     await bootstrap.query(`CREATE SCHEMA ${schema}`);
@@ -46,7 +46,7 @@ async function ledgerFor(seed: number): Promise<{ pool: Pool; schema: string }> 
 /**
  * The adversarial simulator, narrated.
  *
- * The same generator the Phase 8 suite runs, with the answer printed instead of asserted —
+ * The same generator the end-to-end suite runs, with the answer printed instead of asserted —
  * because "158 tests pass" and "here is the day it survived" are different kinds of
  * evidence, and only the second one can be watched.
  *
@@ -145,9 +145,12 @@ async function narrate(
   }
 
   heading('The system checks itself');
-  line(`  Law 6  cached balances == recomputed balances   ${state.cacheAgrees ? '✓ all accounts agree' : '✗ drifted'}`);
   line(
-    `  Law 1  every entry ever written sums to           ` +
+    `  cache  cached balances == recomputed balances   ` +
+      `${state.cacheAgrees ? '✓ all accounts agree' : '✗ drifted'}`,
+  );
+  line(
+    `  ledger every entry ever written sums to           ` +
       `${state.conservationKobo === 0n ? '✓ zero' : `✗ ${state.conservationKobo}`}`,
   );
   line(

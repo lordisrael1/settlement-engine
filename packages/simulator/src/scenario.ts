@@ -18,7 +18,7 @@ import type { AccountId } from '@recon/canon';
  * down to the bytes, and every record downstream is one the real ingest layer produced.
  *
  * Everything here is a pure function of the seed. No clock, no `randomUUID`, no filesystem
- * (Law 5) — a scenario is data, and the same seed is the same bytes forever.
+ * (determinism) — a scenario is data, and the same seed is the same bytes forever.
  */
 
 /** One inbound webhook delivery, signed the way its provider signs. */
@@ -51,7 +51,7 @@ export interface GroundTruth {
   /**
    * The one credit nobody can explain: cash in our account, attached to no payout.
    *
-   * The exit criterion of Phase 8 is that this — and nothing else — reaches a human.
+   * This — and nothing else — may reach a human.
    */
   readonly phantomCreditKeys: readonly string[];
   /** Payouts a bank credit confirms. These book cash, fees, taxes and any clawback. */

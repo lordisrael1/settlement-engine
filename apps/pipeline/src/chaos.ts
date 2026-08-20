@@ -61,7 +61,7 @@ export interface FinalState {
   }[];
   /** Bookings the reconciler tried and the ledger refused. Must always be empty. */
   readonly failures: readonly string[];
-  /** Law 6, and Law 1, checked at the end of every drive. */
+  /** The balance cache and total conservation, checked at the end of every drive. */
   readonly cacheAgrees: boolean;
   readonly conservationKobo: bigint;
 }
@@ -71,7 +71,7 @@ export interface FinalState {
  *
  * The contracts come first because they are not evidence — they are the agreements the
  * evidence is read against, and a fee model that arrives halfway through a reconciliation
- * would make the same file price differently depending on when it landed (Law 5).
+ * would make the same file price differently depending on when it landed (determinism).
  */
 export async function drive(
   pool: Pool,
@@ -206,5 +206,5 @@ export const SIMULATED_SECRETS: Readonly<Record<SourceId, string>> = {
   monnify: 'monnify_test_simulated_secret',
 };
 
-/** The system's own answer to "when is money late", handed to the simulator (Law 7). */
+/** The system's own answer to "when is money late", handed to the simulator. */
 export const calendarFor = (source: SourceId) => sourceProfile(source).calendar;

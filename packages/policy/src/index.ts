@@ -8,12 +8,12 @@
  *
  * Neither of those packages may import the other. The reconciler especially must not reach
  * ingest, because the moment it can read a source table it can branch on a source name
- * (Law 7) — that missing edge is load-bearing, and it is why `SourcePolicy` is handed *in*
- * rather than looked up. So something has to join them, and that something is allowed to
+ * The missing edge is load-bearing, and it is why `SourcePolicy` is handed *in* rather
+ * than looked up. So something has to join them, and that something is allowed to
  * import both precisely because it contains no matching logic to corrupt: it fetches, it
  * joins, it hands over a lookup.
  *
- * This lived in `apps/pipeline` while the CLI was the only deployable. Phase 6 added a
+ * This lived in `apps/pipeline` while the CLI was the only deployable. The service added a
  * second one, and two copies of a join that decides how long to wait before calling money
  * late is two copies that can disagree — which would mean the API and the CLI reconciling
  * the same database to different answers. So it is a library, imported by both.

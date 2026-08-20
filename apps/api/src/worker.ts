@@ -61,14 +61,14 @@ export function interpretDelivery(config: Config, now: () => Date): DeliveryHand
           return {
             state: 'processed',
             transactionId: posted.transactionId,
-            // 'duplicate' is the redelivery Law 4 absorbed: the provider sent the same
+            // 'duplicate' is a redelivery absorbed downstream: the provider sent the same
             // event with different bytes, so the inbox saw two rows and the ledger saw one
             // transaction. Both layers held, and saying which one caught it is worth a word.
             detail: `${result.payment.reference} ${result.payment.status} — ${posted.outcome}`,
           };
         } catch (error) {
           // The ledger refuses to book anything but a SUCCESSFUL payment: a pending or
-          // failed notification is news about a payment, not a promise of money (D-021).
+          // failed notification is news about a payment, not a promise of money (ADR-0021).
           // That rule stays in the ledger — this only records the answer it gave.
           if (error instanceof UnbookablePaymentError) {
             return { state: 'ignored', detail: error.message.split('\n')[0] ?? error.message };

@@ -52,7 +52,7 @@ export async function currentState(
  * The row is locked for the duration, because two workers reacting to the same settlement
  * file would otherwise both read `authorized` and both append a transition — recording
  * one event twice. Re-applying a transition that already happened is a no-op rather than
- * an error, so a retried reconciliation run is safe (Law 4).
+ * an error, so a retried reconciliation run is safe (idempotency).
  */
 export async function transition(
   db: Executor,

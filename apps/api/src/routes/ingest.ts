@@ -18,7 +18,7 @@ import type { Services } from '../services.js';
  * These take a **file**, as bytes, in the request body — not a JSON array of records. The
  * bytes are the evidence, their SHA-256 is the evidence's identity, and a client that
  * re-shaped an export into JSON before sending it has destroyed the only artifact anybody
- * can check a conclusion against six months later (D-033).
+ * can check a conclusion against six months later (ADR-0033).
  *
  * Neither endpoint reconciles anything. Stage two and stage three run on
  * `POST /reconcile/runs`, and keeping the upload separate from the matching is what lets a
@@ -27,8 +27,8 @@ import type { Services } from '../services.js';
  * so far.
  *
  * Both are idempotent by content address: re-uploading the same export stores the evidence
- * once and reports every row as a duplicate. That is Law 4 on the money half, and it is why
- * re-sending a file after a failed parse costs nothing.
+ * once and reports every row as a duplicate, which is why re-sending a file after a failed
+ * parse costs nothing.
  */
 export const ingestRoutes: FastifyPluginCallback<Services> = (app, services, done) => {
   const { pool, config, now } = services;
@@ -56,7 +56,7 @@ export const ingestRoutes: FastifyPluginCallback<Services> = (app, services, don
       // Throws `UnknownSourceError` (404) or `NoSettlementAdapterError` (501). The second is
       // the honest answer for Paystack: no sanitized export has pinned its column layout, so
       // there is no parser, and inventing one produces a parser that looks right and books
-      // the wrong amounts (D-025).
+      // the wrong amounts (ADR-0025).
       const result = ingestSettlement(request.params.source, bytes, {
         merchantId: config.merchantId,
         filename: request.query.filename ?? null,
@@ -91,7 +91,7 @@ export const ingestRoutes: FastifyPluginCallback<Services> = (app, services, don
         // the other has it.
         rejected: result.rejected,
         // Said plainly, because the reflex of every reader is that a settlement report is
-        // money. It is a claim by a party with an interest in the answer (D-027).
+        // money. It is a claim by a party with an interest in the answer (ADR-0027).
         booked: 'nothing — a PSP report is a claim, and only bank evidence books cash',
       });
     },

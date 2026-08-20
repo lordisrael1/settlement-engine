@@ -1,5 +1,5 @@
 /**
- * Money — Law 3.
+ * Money: integer kobo, never a float.
  *
  * All amounts are integer minor units (kobo). Never a float, never a decimal parsed
  * as a number. Conversion from a source's representation happens exactly once, in the
@@ -65,7 +65,7 @@ export function sum(amounts: readonly Money[]): Money {
 }
 
 /**
- * Law 1, as a predicate. Every ledger transaction's entries must satisfy this.
+ * Balance-zero, as a predicate. Every ledger transaction's entries must satisfy this.
  * The authoritative enforcement lives in the ledger core's write path; this is the
  * shared definition of what "balanced" means.
  */

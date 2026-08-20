@@ -71,7 +71,7 @@ export function toSettlementLine(
       merchantId: context.merchantId,
       // The rail, as a typed field rather than only as a hint. It decides which fee
       // contract prices this line, and a decision read out of narration is a decision made
-      // by a regex (D-010).
+      // by a regex (ADR-0010).
       channel: txn.channel as PaymentChannel,
       gross: toMoney(txn.amountInKobo),
       fee: toMoney(txn.feeInKobo),

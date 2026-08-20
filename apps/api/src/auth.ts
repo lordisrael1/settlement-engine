@@ -7,7 +7,7 @@ import type { Config } from './config.js';
 /**
  * The management credential: a static key in a header.
  *
- * Deliberately not on the webhook route, and the asymmetry is the point (D-052). A PSP
+ * Deliberately not on the webhook route, and the asymmetry is the point (ADR-0052). A PSP
  * holds no credential of ours and never will — it proves who it is by signing the bytes it
  * sends with a secret we already share. An operator holds a key. Two rails, two ways of
  * being authentic, and confusing them means either handing a shared secret to every

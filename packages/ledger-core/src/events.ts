@@ -40,7 +40,7 @@ export interface EventInput {
  * Append one event.
  *
  * Idempotent by the derived id: the same happening recorded twice is one row, resolved by a
- * unique index rather than by remembering (Law 4, one level up from the ledger's own). A
+ * unique index rather than by remembering (idempotency, one level up from the ledger's own). A
  * retried reconciliation run therefore produces the same log, not a longer one.
  */
 export async function appendEvent(db: Executor, input: EventInput): Promise<boolean> {
@@ -60,7 +60,7 @@ export async function appendEvent(db: Executor, input: EventInput): Promise<bool
       JSON.stringify(
         (input.entries ?? []).map((entry) => ({
           account_id: entry.accountId,
-          // Text, never a JSON number: a JSON number is a double (Law 3).
+          // Text, never a JSON number: a JSON number is a double (integer kobo).
           kobo: entry.amount.kobo.toString(),
         })),
       ),
@@ -102,7 +102,7 @@ export async function readEvents(
 ): Promise<StoredEvent[]> {
   const result = await db.query<EventRow>(
     // `ORDER BY events.sequence`, qualified, and not `ORDER BY sequence`. The select list
-    // casts the column to text so a BIGINT never rides through a JS number (Law 3), and an
+    // casts the column to text so a BIGINT never rides through a JS number (integer kobo), and an
     // unqualified ORDER BY would bind to that *output* column — sorting the log
     // lexically, as 1, 10, 11, 2, 3. Paging over that order silently re-reads events and
     // folds them twice, which looks exactly like a ledger that has doubled.

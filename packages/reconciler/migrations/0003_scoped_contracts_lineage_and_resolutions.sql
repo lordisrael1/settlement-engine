@@ -39,7 +39,7 @@ ALTER TABLE settlement_lines
   ADD COLUMN source_path       TEXT,
   -- The rail, as a typed field. It was previously present only inside `reason_hints`,
   -- where reading it to price a fee would have meant parsing narration to make a decision —
-  -- exactly what D-010 forbids.
+  -- exactly what ADR-0010 forbids.
   ADD COLUMN channel           TEXT;
 
 ALTER TABLE bank_statement_lines
@@ -98,7 +98,7 @@ ALTER TABLE fee_contracts
 -- was meant to prevent. So the contract that priced it is written down at the moment it
 -- prices it: [{transaction_id, contract_id, channel, expected_fee, expected_vat, observed_fee}].
 --
--- Kobo as text inside the document, never a JSON number — a JSON number is a double (Law 3).
+-- Kobo as text inside the document, never a JSON number — a JSON number is a double.
 -- ---------------------------------------------------------------------------
 ALTER TABLE matches
   ADD COLUMN fee_explanations JSONB NOT NULL DEFAULT '[]';
@@ -125,7 +125,7 @@ ALTER TABLE inflow_allocations
 -- ---------------------------------------------------------------------------
 -- Resolutions: a key, a value, an approver who is not the maker, and a booking.
 --
--- `resolution_key` makes a retried request append one decision rather than two (Law 4), and
+-- `resolution_key` makes a retried request append one decision rather than two (idempotency), and
 -- is the identity of the compensating transaction the decision posts. Backfilled for any
 -- row written before it existed, because those decisions really were distinct.
 -- ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ ALTER TABLE resolutions
   ADD COLUMN currency              TEXT,
   ADD COLUMN booked_transaction_id TEXT REFERENCES ledger_transactions (transaction_id);
 
--- Law 2's trigger is statement-level, so it refuses this backfill even when there are no
+-- The append-only trigger is statement-level, so it refuses this backfill even when there are no
 -- rows to back-fill. Lifting it here is not an exception to the law: a migration is the one
 -- place the *shape* of history may change, it runs inside a transaction so no other session
 -- ever sees the table unguarded, and the trigger goes straight back on below. The

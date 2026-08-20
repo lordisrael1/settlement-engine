@@ -2,8 +2,8 @@
  * @recon/ledger-core — the double-entry engine.
  *
  * The only path to writing money. Everything else in the system — ingest, the
- * reconciler, the API — must come through `postTransaction`, which is what makes Law 1
- * enforceable rather than merely intended.
+ * reconciler, the API — must come through `postTransaction`, which is what makes the
+ * balance-zero invariant enforceable rather than merely intended.
  *
  * It knows accounts, entries and invariants. It knows nothing about Paystack, HTTP or
  * files, and must never learn.

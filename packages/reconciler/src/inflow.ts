@@ -42,7 +42,7 @@ export interface ExpectedInflow {
   /** Named deductions, already collapsed to one entry per account. */
   readonly deductions: readonly { accountId: AccountId; amount: Money }[];
 
-  /** When the money is expected to move. `null` when nobody said (D-019). */
+  /** When the money is expected to move. `null` when nobody said (ADR-0019). */
   readonly valueDate: Date | null;
   readonly settlementKeys: readonly IdempotencyKey[];
   readonly evidenceId: string;

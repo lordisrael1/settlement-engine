@@ -17,7 +17,7 @@ import type { PaymentChannel } from './payment.js';
  *   authorized → reversed    the promise was undone
  *   authorized → exception   the money never came, past its settlement window
  *
- * The state is never edited in place on the entries; transitions are recorded (Law 2).
+ * The state is never edited in place on the entries; transitions are recorded (append-only).
  */
 export type TransactionState = 'authorized' | 'settled' | 'reversed' | 'exception';
 
@@ -33,15 +33,15 @@ export interface Entry {
 }
 
 /**
- * A single economic event. Its entries sum to exactly zero (Law 1) and are never
- * updated or deleted (Law 2).
+ * A single economic event. Its entries sum to exactly zero (balance-zero) and are never
+ * updated or deleted (append-only).
  */
 export interface LedgerTransaction {
   /**
    * **The transaction's id is the causing event's idempotency key.** A transaction is
    * the record of exactly one event, so giving it any other identity would mean
    * maintaining a second uniqueness constraint that could disagree with the first.
-   * With this equality, Law 4 is enforced by the primary key itself: the same event
+   * With this equality, idempotency is enforced by the primary key itself: the same event
    * posted twice collides on insert and the duplicate is dropped, with no read-then-write
    * race for concurrent workers to lose.
    */
@@ -64,7 +64,7 @@ export interface LedgerTransaction {
 
   /** When it happened in the world. Drives settlement windows. */
   readonly occurredAt: Date;
-  /** When we learned of it. Never used to derive a number (Law 5). */
+  /** When we learned of it. Never used to derive a number (determinism). */
   readonly recordedAt: Date;
 }
 

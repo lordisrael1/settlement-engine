@@ -33,7 +33,7 @@ import {
  * Two properties matter more than realism, and both are deliberate:
  *
  *   **Determinism.** Every draw comes from the seed. A red build hands you one integer that
- *   reproduces the exact bytes on any machine (Law 5). An adversarial suite you cannot
+ *   reproduces the exact bytes on any machine (determinism). An adversarial suite you cannot
  *   reproduce has not found a bug; it has produced a rumour.
  *
  *   **Ground truth by construction.** What each anomaly *is* is decided here, as it is

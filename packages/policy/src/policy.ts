@@ -10,7 +10,7 @@ import { loadFeeContracts, type PolicyLookup, type SourcePolicy } from '@recon/r
  * Contracts are loaded once per run rather than per payment. A reconciliation is a snapshot
  * taken at `asOf`, and re-reading the contract table halfway through would let a concurrent
  * edit change the answer partway down the file — the same run reaching two different
- * conclusions about two identical payments (Law 5).
+ * conclusions about two identical payments (determinism).
  */
 export async function buildPolicy(
   db: Executor,
@@ -26,7 +26,7 @@ export async function buildPolicy(
       calendar: profile.calendar,
       // No contract is the honest answer for a source we have no agreement with: the
       // matcher then matches on amounts alone and reports the fee it observed, rather
-      // than generating a stream of variances against a rate nobody quoted (D-026).
+      // than generating a stream of variances against a rate nobody quoted (ADR-0026).
       expectedFee: contracts.length === 0 ? null : feeModel(contracts),
       // Correspondent-bank charges on an inbound transfer are real, small and never
       // announced. ₦100 is the threshold below which chasing one costs more than it is

@@ -4,7 +4,7 @@ import type { BusinessCalendar, FeeModel, SourceId } from '@recon/canon';
  * Everything the matcher is told about where a record came from.
  *
  * Note what it is: *data*, handed in. Not a lookup the matcher performs. That is what
- * keeps `if (source === 'paystack')` structurally impossible in here (Law 7) — the
+ * keeps `if (source === 'paystack')` structurally impossible in here — the
  * reconciler cannot branch on a source name because it is never given one it could branch
  * on, only a calendar and a fee model.
  *
@@ -17,7 +17,7 @@ export interface SourcePolicy {
   /**
    * `null` when we hold no contract for this source and merchant — an honest "we cannot
    * predict this", which becomes matching on amounts alone rather than a false variance
-   * against a rate nobody agreed to (D-026).
+   * against a rate nobody agreed to (ADR-0026).
    */
   readonly expectedFee: FeeModel | null;
   /**

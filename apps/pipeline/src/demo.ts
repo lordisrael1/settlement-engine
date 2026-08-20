@@ -75,12 +75,11 @@ const SIGNERS: Record<string, { secret: string; sign: (raw: Buffer) => Record<st
 };
 
 /**
- * The whole of Phases 1 and 2, end to end, against a real database.
+ * The whole system, end to end, against a real database.
  *
- * Running it a second time is not a mistake — it is the point. Every step is idempotent,
- * so the second run reports duplicates everywhere and moves not one kobo. That is Law 4
- * demonstrated rather than asserted. For a clean narrative, start from an empty volume:
- * `docker compose down -v && docker compose up`.
+ * Running it a second time is part of the point: every step is idempotent, so the second
+ * run reports duplicates everywhere and moves not one kobo. For a clean run, start from an
+ * empty volume with `docker compose down -v && docker compose up`.
  */
 export async function runDemo(pool: Pool): Promise<boolean> {
   const now = new Date('2026-08-15T10:00:00Z');
@@ -111,7 +110,7 @@ export async function runDemo(pool: Pool): Promise<boolean> {
     line(`  ${result.summary}`);
   }
 
-  heading('2 · Paystack redelivers the first webhook — Law 4');
+  heading('2 · Paystack redelivers the first webhook — idempotency');
   line('  Providers retry until you answer 200. Duplicates are guaranteed, not unlikely.');
   const redelivered = await deliver(pool, 'paystack', webhooks[0], now);
   line(`  ${redelivered.summary}`);
@@ -123,7 +122,7 @@ export async function runDemo(pool: Pool): Promise<boolean> {
   line('  gross; no fee has been booked, because no fee is known yet.');
 
   // ── The invariants ────────────────────────────────────────────────────────
-  heading('4 · An unbalanced transaction is refused — Law 1');
+  heading('4 · An unbalanced transaction is refused — balance-zero');
 
   try {
     await bookUnbalanced(pool);
@@ -143,7 +142,7 @@ export async function runDemo(pool: Pool): Promise<boolean> {
     line('       cannot be evaded by writing entries one statement at a time.');
   }
 
-  heading('5 · History cannot be edited — Law 2');
+  heading('5 · History cannot be edited — append-only');
   try {
     await pool.query('UPDATE entries SET amount_kobo = 0');
     line('  ✗ an entry was rewritten');
@@ -223,7 +222,7 @@ export async function runDemo(pool: Pool): Promise<boolean> {
   await recordPayouts(pool, reported.payouts);
   await recordSettlementLines(pool, reported.lines);
 
-  heading('8 · The same report again — Law 4 on the money half');
+  heading('8 · The same report again — idempotency on the money half');
   const reingested = ingestSettlement('flutterwave', settlementBytes, {
     merchantId: MERCHANT,
     filename: 'flutterwave-settlements.json',
@@ -256,9 +255,8 @@ export async function runDemo(pool: Pool): Promise<boolean> {
   line('  source\u2019s business-day window. And the bank balance did not move:');
   line(`    bank_account before ${format(beforeStageTwo)}   after ${format(afterStageTwo)}`);
   line();
-  line('  This is the whole point. Flutterwave has told us what it intends to send. That');
-  line('  is evidence, not money, and a ledger that books on intent reports cash it does');
-  line('  not have.');
+  line('  Flutterwave has told us what it intends to send. That is evidence, not money,');
+  line('  and a ledger that books on intent reports cash it does not have.');
 
   const bankUnmoved = beforeStageTwo.kobo === afterStageTwo.kobo;
   if (!bankUnmoved) line('  ✗ the PSP\u2019s word moved the bank balance');
@@ -308,7 +306,7 @@ export async function runDemo(pool: Pool): Promise<boolean> {
   line('  bank_account holds real cash for the first time, and every deduction sits in');
   line('  the account that describes it rather than in a catch-all fee.');
 
-  heading('13 · Reconciling again changes nothing — Law 4 on the matching');
+  heading('13 · Reconciling again changes nothing — idempotency on the matching');
   const rerun = await reconcile(pool, { asOf: now, policyFor });
   line(`  ${rerun.booked.length} newly booked.`);
   line('  Every credit was spent by the previous run, and a partial unique index would');
@@ -317,7 +315,7 @@ export async function runDemo(pool: Pool): Promise<boolean> {
   if (!idempotent) line('  ✗ the second run moved money');
 
   // ── Reversal ──────────────────────────────────────────────────────────────
-  heading('14 · A payment is reversed — Law 2, operationally');
+  heading('14 · A payment is reversed — append-only, operationally');
   const target = postedIds[postedIds.length - 1]!;
   const reversal = await reverse(pool, target, now);
   const original = await getTransaction(pool, target);

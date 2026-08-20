@@ -5,10 +5,10 @@ import type { Executor } from '@recon/ledger-core';
 /**
  * What reconciliation did over a period, in the three numbers the business asks for.
  *
- * The doctrine's phrasing is "matched / explained / exceptions per period", and the
- * grouping is not this file's to invent: `reasonKind` in `canon` is the single authority on
+ * The three buckets are matched, explained and exceptions, and the grouping is not this
+ * file's to invent: `reasonKind` in `canon` is the single authority on
  * which bucket a reason code falls into, and a second copy of that mapping in a SQL `CASE`
- * would be a copy that could disagree (D-036).
+ * would be a copy that could disagree (ADR-0036).
  *
  * Two of the four sections are deliberately *not* windowed, and the distinction matters.
  * Conclusions and cash are things that happened between two dates. The queue and the money
@@ -90,7 +90,7 @@ export async function summarize(
 
   // Cash, counted from the ledger rather than from the matcher's own report of itself. A
   // summary that asked the matcher how much it had banked would agree with the matcher by
-  // construction; asking the entries makes the number checkable against Law 1.
+  // construction; asking the entries makes the number checkable against the ledger itself.
   const banked = await db.query<{ transactions: string; credited: string }>(
     `SELECT COUNT(DISTINCT e.transaction_id)::text AS transactions,
             COALESCE(SUM(e.amount_kobo), 0)::text AS credited

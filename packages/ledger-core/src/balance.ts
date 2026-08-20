@@ -7,7 +7,7 @@ import type { Executor } from './pool.js';
  * The balance of an account: the sum of its entries. Nothing else.
  *
  * This is the definition, not an optimisation of one. `cachedBalance` below is the
- * optimisation, and Law 6 exists to keep it honest about being one.
+ * optimisation, and `verifyBalances` keeps it honest about being one.
  */
 export async function balance(db: Executor, accountId: AccountId): Promise<Money> {
   const result = await db.query<{ total: string }>(
@@ -48,7 +48,7 @@ export interface BalanceDiscrepancy {
 }
 
 /**
- * Law 6, as an assertion you can run at any moment.
+ * Cache against recomputation, as an assertion that can be run at any moment.
  *
  * Returns the accounts where the cache disagrees with the entries. An empty array is the
  * system proving to itself that its own shortcut has not drifted — the same
@@ -86,7 +86,7 @@ export async function verifyBalances(db: Executor): Promise<BalanceDiscrepancy[]
 }
 
 /**
- * Law 1, at the scale of the whole ledger: every entry ever written, summed, must be
+ * Conservation across the whole ledger: every entry ever written, summed, must be
  * zero. Each transaction balancing individually implies it, so a non-zero result here
  * means an entry exists outside any balanced transaction — corruption, not a bug in
  * arithmetic. Cheap enough to run on every deploy.

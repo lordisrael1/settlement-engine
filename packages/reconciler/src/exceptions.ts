@@ -26,7 +26,7 @@ import { recordResolution } from './store.js';
 /**
  * The queue — and the machinery that keeps it honest between runs.
  *
- * Phase 3 could tell you what was wrong *right now*. It could not tell you that the same
+ * A run can say what is wrong *right now*. On its own it cannot say that the same
  * thing had been wrong since Tuesday, that Amaka was already looking at it, or that it had
  * quietly fixed itself when the settlement file finally arrived. Every run started from
  * nothing and reported everything, which is a report, not a queue.
@@ -38,8 +38,8 @@ import { recordResolution } from './store.js';
  *   `clearVanished`    the run no longer finds it, so it is over
  *
  * Without `clearVanished` the queue only grows, and a queue that only grows is one people
- * stop opening. It is also the bible's own exit criterion for this phase: a T+1 straggler
- * sits as pending, and clears itself when its file lands, with nobody woken.
+ * stop opening. With it, a T+1 straggler sits as pending and clears itself when its file
+ * lands, with nobody alerted.
  */
 
 const kobo = (amount: Money): string => amount.kobo.toString();
@@ -375,7 +375,7 @@ async function moveTo(
     const row = existing.rows[0];
     if (!row) return false;
     // Re-applying a move that already happened is a no-op rather than an error, so a
-    // retried request is safe (Law 4); an illegal one is a no-op too, because the caller
+    // retried request is safe (idempotency); an illegal one is a no-op too, because the caller
     // asking is a UI and a thrown error there says nothing a `false` does not.
     if (row.state === to || !canTransition(row.state, to)) return false;
 

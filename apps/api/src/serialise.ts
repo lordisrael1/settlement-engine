@@ -17,7 +17,7 @@ import type { ReconciliationRun, ReconciliationSummary } from '@recon/reconciler
  *
  *   **`bigint` throws.** Deliberately, in the language itself. Serialising kobo as a JSON
  *   number would be worse than the throw — a JSON number is a double, and a double is not
- *   a ledger amount (Law 3). So every amount crosses as a decimal *string*, exactly as it
+ *   a ledger amount (integer kobo). So every amount crosses as a decimal *string*, exactly as it
  *   crosses into Postgres.
  *
  *   **`Date` is fine** and left alone: `toJSON` produces ISO-8601 UTC, which is what a
@@ -28,7 +28,7 @@ import type { ReconciliationRun, ReconciliationSummary } from '@recon/reconciler
  * reimplementing kobo-to-naira, and a dashboard that divides by 100 in JavaScript has
  * turned an exact integer back into a float at the last possible moment.
  *
- * D-007 said representation belongs at the boundary. This is the boundary.
+ * ADR-0007 said representation belongs at the boundary. This is the boundary.
  */
 export interface JsonMoney {
   readonly kobo: string;
@@ -68,7 +68,7 @@ export function asException(item: ReconciliationException): unknown {
       settlementKeys: item.settlementKeys,
     },
     // The working, kept. An exception without it hands a human a mystery and throws away
-    // the reasoning that would have made it a minute's work (D-045).
+    // the reasoning that would have made it a minute's work (ADR-0045).
     considered: item.considered.map((candidate) => ({
       candidateId: candidate.candidateId,
       kind: candidate.kind,

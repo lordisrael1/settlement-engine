@@ -54,12 +54,12 @@ import { uniqueSubsetSummingTo, type SubsetLimits, DEFAULT_SUBSET_LIMITS } from 
  *
  * Both stages are pure functions of their arguments. No clock, no database, no network:
  * `asOf` is passed in, so the same inputs produce the same partition on any day, on any
- * machine, however many times you run them (Law 5). A reconciliation you cannot replay is
- * a reconciliation you cannot audit.
+ * machine, however many times they are run. A reconciliation that cannot be replayed is a
+ * reconciliation that cannot be audited.
  *
  * And nothing in here learns a source's name in a form it could branch on. Everything
- * per-source arrives as a `SourcePolicy` — a calendar, a fee model, an allowance — so
- * Law 7 is not a rule anybody has to remember.
+ * per-source arrives as a `SourcePolicy` — a calendar, a fee model, an allowance — so the
+ * canonical boundary holds structurally rather than by convention.
  */
 
 /**
@@ -919,7 +919,7 @@ function explainAllocations(
  *
  * Status is read first, because "the money came back" and "the money is coming" are
  * different events that happen to share a reference. Status is a typed canonical field —
- * `reasonHints` are evidence for a human and are never parsed to reach a decision (D-010).
+ * `reasonHints` are evidence for a human and are never parsed to reach a decision (ADR-0010).
  */
 function concludeByReference(
   promise: OpenPromise,
@@ -1058,7 +1058,7 @@ function partialCandidate(
 }
 
 /**
- * A source that does not disclose when the money moved (D-019) leaves no timestamp to
+ * A source that does not disclose when the money moved (ADR-0019) leaves no timestamp to
  * reason against. Rather than substitute the run's own clock — the one input that would
  * make a replay disagree with the original run — such a movement is matched on arithmetic
  * alone, without a time filter.

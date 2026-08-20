@@ -16,7 +16,7 @@ import { startInboxWorker } from './worker.js';
  *
  * It joins `apps/pipeline` rather than replacing it. One set of libraries, two ways to run
  * them: a service for the traffic and a CLI for the operator, and nothing under `packages/`
- * changed when this arrived, which is what the split was for (D-022).
+ * changed when this arrived, which is what the split was for (ADR-0022).
  */
 
 /**

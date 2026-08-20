@@ -118,7 +118,7 @@ export interface DischargedPromise {
  * The bank evidence that lets any of this be booked at all.
  *
  * `transactionId` is not a field: the bank credit's idempotency key *is* the transaction
- * id (D-014). One credit is one economic event, and giving the booking a second identity
+ * id (ADR-0014). One credit is one economic event, and giving the booking a second identity
  * would mean two uniqueness constraints that can disagree. With the equality, a
  * reconciliation that dies halfway and is retried cannot double-book — the second attempt
  * collides on the primary key.
@@ -252,7 +252,7 @@ export interface BookingEvent {
  * fact that it ever happened. A contra-income account records the giving-back as its own
  * event, so gross revenue reporting survives the refund and an auditor sees both halves.
  *
- * This is the domain decision `reverse()` deliberately refuses to make (D-024). That
+ * This is the domain decision `reverse()` deliberately refuses to make (ADR-0024). That
  * primitive is an exact negation, correct without knowing what caused it; this one knows
  * it is looking at a refunded payment and books it as one.
  *
@@ -337,7 +337,7 @@ export async function bookChargeback(
  * The bank sent a payout back after we had already booked it as cash.
  *
  * An exact negation of the confirming transaction, written as its own event rather than by
- * unwinding the original (Law 2). Every account it touched moves back, which means the
+ * unwinding the original (append-only). Every account it touched moves back, which means the
  * receivable reopens: the PSP still owes us, and the payments it covered go back to
  * waiting. Their lifecycle state is not rolled back here — `settled` is terminal, and the
  * fact that they were once settled is part of the history.
@@ -392,7 +392,7 @@ export class UnbookableResolutionError extends LedgerError {
  *   the point of recording, because this is the function that actually moves value and a
  *   control enforced in only one place is one refactor away from not existing.
  *
- * The transaction's id is the resolution's key, so a retried request books once (Law 4).
+ * The transaction's id is the resolution's key, so a retried request books once (idempotency).
  */
 export async function bookResolutionAdjustment(
   db: Executor,

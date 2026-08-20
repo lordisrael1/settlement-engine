@@ -115,7 +115,7 @@ export interface Payout {
 
   /** When the PSP produced the report. */
   readonly reportedAt: Date;
-  /** When the PSP says the money moves. `null` when it does not disclose one (D-019). */
+  /** When the PSP says the money moves. `null` when it does not disclose one (ADR-0019). */
   readonly valueDate: Date | null;
 
   /** The file this came out of — see `Evidence`. Every payout is traceable to bytes. */

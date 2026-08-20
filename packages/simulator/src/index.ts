@@ -16,7 +16,7 @@
  *   real ingest layer produced from bytes the real signature check accepted.
  *
  *   **It is a function of its seed.** No clock, no `randomUUID`, no filesystem. A red build
- *   hands you one integer that reproduces the exact bytes anywhere, forever (Law 5). An
+ *   hands you one integer that reproduces the exact bytes anywhere, forever (determinism). An
  *   adversarial suite you cannot reproduce has not found a bug; it has produced a rumour.
  *
  *   **Its ground truth is declared, not derived.** What each planted anomaly *is* is decided

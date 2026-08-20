@@ -43,7 +43,7 @@ export const DEFAULT_SUBSET_LIMITS: SubsetLimits = {
  * The one combination of `items` whose values sum to `target`, if there is exactly one.
  *
  * `items` must already be in the caller's canonical order: the search is deterministic,
- * and its determinism is inherited from that order, not manufactured here (Law 5).
+ * and its determinism is inherited from that order, not manufactured here (determinism).
  * Non-positive values are dropped, because a zero-valued item would make every solution
  * that contains it a second, spurious "distinct" answer.
  */

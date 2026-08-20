@@ -1,7 +1,7 @@
 /**
  * The exception — a difference nobody has explained yet, with a life of its own.
  *
- * Phase 3 produced conclusions: every run partitioned the world into matched, explained and
+ * Matching produces conclusions: every run partitions the world into matched, explained and
  * unexplained, and wrote down what it decided. What it could not do is remember. Each run
  * rediscovered the same unexplained difference, reported it again, and had no way to say
  * whether a human had already looked at it, whether it had been there for a week, or whether
@@ -17,7 +17,7 @@
  *   **It has a lifecycle, and the lifecycle is appended.** `open → acknowledged → resolved`,
  *   recorded as events exactly as the ledger records its own transitions. A mutable `state`
  *   column would be an `UPDATE`, and `UPDATE`s are how history gets quietly rewritten
- *   (Law 2).
+ *   (append-only).
  *
  *   **It carries what the matcher rejected.** An exception that says "unidentified" without
  *   saying what was considered is a question passed to a human with the working thrown away.
@@ -85,7 +85,7 @@ export type ResolutionCause =
  *
  * `key` is derived from the subject and the reason rather than generated, so that the same
  * difference found on Monday and again on Tuesday is one exception with one history — and
- * so that a replay reaches the same keys (Law 5).
+ * so that a replay reaches the same keys (determinism).
  */
 export interface ReconciliationException {
   readonly key: string;
@@ -126,7 +126,7 @@ const SEPARATOR = String.fromCharCode(31);
  * The natural key of a difference.
  *
  * Derived, never generated. A `randomUUID` here would make the same problem found twice
- * into two problems, and would make a replay disagree with the run it replays (Law 5).
+ * into two problems, and would make a replay disagree with the run it replays (determinism).
  */
 export function exceptionKey(
   subject: ExceptionSubject,

@@ -40,7 +40,7 @@ export async function inTransaction<T>(
   try {
     await client.query('BEGIN');
     const result = await fn(client);
-    // Law 1's deferred constraint trigger fires here, not on INSERT. If the entries
+    // The deferred balance-zero constraint trigger fires here, not on INSERT. If the entries
     // do not sum to zero, this is the statement that throws.
     await client.query('COMMIT');
     return result;

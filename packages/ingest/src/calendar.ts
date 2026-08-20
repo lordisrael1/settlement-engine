@@ -94,7 +94,7 @@ const WEEKEND = [0, 6] as const;
  * `graceMinutes` is ours, not theirs. The deadline is when money was *expected*; the grace
  * period is how long we tolerate its absence before waking somebody. A day of grace on a
  * T+1 rail means an ordinary delay resolves itself overnight and only a real problem
- * survives to become an exception (D-026).
+ * survives to become an exception (ADR-0026).
  */
 export function calendar(options: {
   cutOffMinutes: number;

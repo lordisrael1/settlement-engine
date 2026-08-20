@@ -6,7 +6,7 @@ export interface Deduped<T> {
 }
 
 /**
- * Law 4, as a pure function.
+ * Deduplication, as a pure function.
  *
  * Two kinds of duplicate are removed: events already seen in an earlier run, and events
  * repeated *within* this batch — a re-exported file that overlaps the previous one, or a
@@ -18,7 +18,7 @@ export interface Deduped<T> {
  * record of having seen them lives is a decision for a layer that owns storage.
  *
  * Order is preserved, and the first occurrence wins, so the result does not depend on
- * anything but the input (Law 5).
+ * anything but the input (determinism).
  */
 export function dedupe<T extends { readonly idempotencyKey: IdempotencyKey }>(
   items: readonly T[],

@@ -1,5 +1,5 @@
 /**
- * The chart of accounts — Appendix B of the bible.
+ * The chart of accounts.
  *
  * A fixed, closed set. Adding an account is a deliberate act of domain design, not
  * configuration, so the set lives in code and the type system knows every member.
@@ -29,7 +29,7 @@ export type AccountType = 'asset' | 'income' | 'expense' | 'contra_income' | 'ho
  * `1` is debit-natural (value in is positive), `-1` is credit-natural.
  *
  * Contra-income accounts are debit-natural precisely because they *reduce* income:
- * a reversal debits a contra account rather than editing the original credit (Law 2).
+ * a reversal debits a contra account rather than editing the original credit (append-only).
  */
 export type NaturalSign = 1 | -1;
 

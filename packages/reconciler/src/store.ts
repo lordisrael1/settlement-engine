@@ -38,7 +38,7 @@ const NGN = 'NGN' as const;
  * Money in and out of the database, as text.
  *
  * A `BIGINT` must never round-trip through a JS number and a JSON number is a double, so
- * every amount crosses this boundary as a string and is cast on the way in (Law 3).
+ * every amount crosses this boundary as a string and is cast on the way in (integer kobo).
  */
 const kobo = (amount: Money): string => amount.kobo.toString();
 const fromKobo = (text: string | null): Money => money(BigInt(text ?? '0'));
@@ -290,7 +290,7 @@ export async function recordSettlementLines(
  * When a batch of records was learned of.
  *
  * Taken from the records rather than from a clock, because a clock read here would make the
- * same file ingested twice produce two different logs (Law 5).
+ * same file ingested twice produce two different logs (determinism).
  */
 function recordedAtOf(lines: readonly { settledAt: Date | null }[]): Date {
   const dated = lines.map((line) => line.settledAt).filter((at): at is Date => at !== null);

@@ -67,8 +67,7 @@ describe('replay', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run' }, (
     );
 
   /**
-   * The bible's exit criterion for this phase, executed rather than argued: delete the
-   * projection, fold the log from event zero, and the numbers come back.
+   * Delete the projection, fold the log from event zero, and the numbers come back.
    */
   test('deleting the balances and replaying the log reproduces them exactly', async () => {
     await payment('replay-pay-1', 1_000_000n);
@@ -150,7 +149,7 @@ describe('replay', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run' }, (
     );
   });
 
-  /** Law 2, on the record that proves every other record. */
+  /** Append-only, on the record that proves every other record. */
   test('the log itself cannot be rewritten', async () => {
     await assert.rejects(
       pool.query(`UPDATE events SET type = 'ChargebackBooked'`),
@@ -185,7 +184,7 @@ describe('replay', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run' }, (
   /**
    * A retried request appends one happening, not two. The id is derived from the type and
    * the subject, so redelivery collides in the database rather than in a check-then-insert
-   * window (Law 4, one level up from the ledger's own).
+   * window (idempotency, one level up from the ledger's own).
    */
   test('replaying the same happening twice appends one event', async () => {
     const before = await countEvents(pool);
@@ -198,7 +197,7 @@ describe('replay', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run' }, (
    * The log is read in numeric order, and paging over it visits each event exactly once.
    *
    * This is a regression test for a bug worth remembering. The select list casts `sequence`
-   * to text so a `BIGINT` never rides through a JS number (Law 3) — and an unqualified
+   * to text so a `BIGINT` never rides through a JS number (integer kobo) — and an unqualified
    * `ORDER BY sequence` binds to that *output* column, sorting the log lexically as
    * 1, 10, 11, 2, 3. Paging over that order re-reads events 10 and up, folds them twice,
    * and produces a ledger that appears to have doubled. It passes unnoticed until the log
@@ -228,7 +227,7 @@ describe('replay', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run' }, (
   });
 
   /**
-   * Law 5, at the scale of the whole system. The fold is a pure function of the log, so
+   * Determinism, at the scale of the whole system. The fold is a pure function of the log, so
    * folding it twice — or in pages, or in one go — must reach the same numbers.
    */
   test('the fold is a pure function of the log', async () => {

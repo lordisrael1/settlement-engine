@@ -37,7 +37,7 @@ export interface SettlementLine {
   /**
    * Which rail carried it. Also drives which fee contract applies — card and transfer are
    * rarely the same rate — which is why it is a typed field rather than a `reasonHint`
-   * somebody downstream would have to parse (D-010).
+   * somebody downstream would have to parse (ADR-0010).
    */
   readonly channel: PaymentChannel;
 
@@ -63,7 +63,7 @@ export interface SettlementLine {
   /**
    * Free-text notes the source attached (narration, reason strings). Retained verbatim
    * for exception context and as evidence for a match — never parsed to make a decision,
-   * which would smuggle source-specific logic downstream (Law 7).
+   * which would smuggle source-specific logic downstream (the canonical boundary).
    */
   readonly reasonHints: readonly string[];
 

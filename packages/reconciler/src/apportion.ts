@@ -22,7 +22,7 @@ import { money, subtract, sum, ZERO } from '@recon/canon';
  * disagree with the deduction actually booked, which is the same class of error as a plug
  * entry, arriving one kobo at a time. And tied by transaction id because when two payments
  * have identical remainders somebody has to get the spare kobo, and "whichever the map
- * iterated first" is not a decision anybody can reproduce (Law 5).
+ * iterated first" is not a decision anybody can reproduce (determinism).
  *
  * What this is *not*: it is not a claim about what the PSP would have charged had each
  * payment settled alone. A flat-fee component or a cap makes that a different number, and

@@ -21,7 +21,7 @@
  * March's holiday table — the same discipline `fees.ts` applies to rates, applied to time.
  *
  * Everything here is pure arithmetic on arguments. Nothing reads a clock, so a run in
- * March and a replay of it in December agree about what was late (Law 5).
+ * March and a replay of it in December agree about what was late (determinism).
  */
 
 import type { CalendarDate, TimeZoneName } from './zone.js';
@@ -81,7 +81,7 @@ export interface BusinessCalendar {
    *
    * The deadline marks when the money was *expected*; this marks when its absence becomes
    * an exception a human is woken for. They are different questions and deserve different
-   * numbers — see D-026.
+   * numbers — see ADR-0026.
    */
   readonly graceMinutes: number;
 }
@@ -97,7 +97,7 @@ export function localDay(calendar: BusinessCalendar, instant: Date): CalendarDat
  * The edition of the holiday table that governs this day, or `null` if none covers it.
  *
  * Highest revision wins, and the id breaks ties so that two editions loaded in a different
- * order still produce the same answer (Law 5 reaches even here).
+ * order still produce the same answer.
  */
 export function holidayCalendarFor(
   calendar: BusinessCalendar,

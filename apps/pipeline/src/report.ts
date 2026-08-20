@@ -118,17 +118,17 @@ export async function printQueue(db: Executor, limit = 50): Promise<number> {
 }
 
 /**
- * The system checking itself: the cache against the entries (Law 6), and every entry
- * ever written against zero (Law 1 at the scale of the whole ledger).
+ * The system checking itself: the balance cache against the entries, and every entry ever
+ * written against zero.
  */
 export async function printVerification(db: Executor): Promise<boolean> {
   const discrepancies = await verifyBalances(db);
   const conservation: Money = await verifyConservation(db);
 
   if (discrepancies.length === 0) {
-    console.log('  Law 6  cached balances == recomputed balances   ✓ all accounts agree');
+    console.log('  cache  cached balances == recomputed balances   ✓ all accounts agree');
   } else {
-    console.log('  Law 6  cached balances != recomputed balances   ✗');
+    console.log('  cache  cached balances != recomputed balances   ✗');
     for (const d of discrepancies) {
       console.log(
         `         ${d.accountId}: cached ${format(d.cached)}, entries say ${format(d.recomputed)} ` +
@@ -140,8 +140,8 @@ export async function printVerification(db: Executor): Promise<boolean> {
   const conserved = isZero(conservation);
   console.log(
     conserved
-      ? '  Law 1  every entry ever written sums to           ✓ zero'
-      : `  Law 1  every entry ever written sums to           ✗ ${format(conservation)}`,
+      ? '  ledger every entry ever written sums to           ✓ zero'
+      : `  ledger every entry ever written sums to           ✗ ${format(conservation)}`,
   );
 
   return discrepancies.length === 0 && conserved;

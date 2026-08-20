@@ -64,7 +64,7 @@ import type { SubsetLimits } from './subset.js';
  * confirming two inflows. Two independent refusals, neither of which we have to remember.
  */
 export interface ReconcileInput {
-  /** The clock, as an argument. Nothing in here ever calls `new Date()` (Law 5). */
+  /** The clock, as an argument. Nothing in here ever calls `new Date()` (determinism). */
   readonly asOf: Date;
   readonly policyFor: PolicyLookup;
   readonly limit?: number;
@@ -315,7 +315,7 @@ function amountOf(
  * Cash that arrived and then left again.
  *
  * Booked as an exact negation of the transaction that confirmed it, written as its own
- * event rather than by unwinding the original (Law 2). Every account it touched moves back,
+ * event rather than by unwinding the original (append-only). Every account it touched moves back,
  * which means the receivable reopens: the PSP still owes us, and the payments the payout
  * covered go back to waiting.
  */
@@ -440,7 +440,7 @@ async function bookImmediately(
  * The promises worth considering.
  *
  * `authorized` and `exception` are the ones waiting for money — an exception is a question
- * a late settlement file can still answer, which is why it is not a terminal state (D-016).
+ * a late settlement file can still answer, which is why it is not a terminal state (ADR-0016).
  * `settled` transactions come too, because a chargeback can only apply to money that
  * already landed, and it needs to find the payment it is clawing back.
  */

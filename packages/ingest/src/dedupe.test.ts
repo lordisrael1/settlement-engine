@@ -16,7 +16,7 @@ test('events seen in an earlier run are dropped', () => {
 });
 
 /**
- * The easy half of Law 4 is remembering earlier runs. The half that gets forgotten is
+ * The easy half of deduplication is remembering earlier runs. The half that gets forgotten is
  * a batch that repeats a record inside itself — an overlapping re-export, or a provider
  * listing one record twice on a page — which does exactly the same damage.
  */

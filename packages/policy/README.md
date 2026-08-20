@@ -1,23 +1,27 @@
-# @recon/policy — the seam
+# @recon/policy
 
-**Problem it solves.** The matcher needs a business calendar and a fee model per source.
-The calendar is declared by `ingest`, beside the adapter that knows the rail. The
-contracts are administered data with effective dates and an approver, so they live in the
-database. `reconciler` may import neither — the moment it can read a source table it can
-branch on a source name, and that missing edge is what makes Law 7 structural rather than
-remembered.
+Joins the per-source business calendars declared by `@recon/ingest` to the fee contracts
+administered in the database, and returns the `PolicyLookup` the matcher takes as an
+argument.
 
-**What it is.** One function, `buildPolicy(db, merchantId)`, that fetches both and returns
-the `PolicyLookup` the matcher takes as an argument. No matching logic, no per-source
-branches, nothing that decides anything about money.
+**Depends on:** `canon`, `ingest`, `ledger-core`, `reconciler`.
+**Imported by:** the deployables only.
 
-**Why it is a package and not a file in an app.** It was a file in an app — Phase 3 put it
-in `apps/pipeline`, when the CLI was the only deployable. Phase 6 added a second, and two
-copies of the join that decides how long to wait before calling money late is two copies
-that can disagree: the API and the CLI would reconcile the same database to different
-answers.
+## Why it exists
 
-**Depends on:** `canon`, `ingest`, `ledger-core`, `reconciler`. **Depended on by:** the
-deployables only. It is the one package with that shape, and deliberately the only one.
+The matcher needs a calendar and a fee model per source. `@recon/reconciler` may import
+neither: the moment it can read a source table it can branch on a source name, and that
+missing edge is what keeps the canonical boundary structural rather than remembered. So the
+join happens here, in a module that decides nothing — it fetches, it joins, it hands over a
+lookup.
 
-See [DECISIONS.md § D-055](../../docs/DECISIONS.md).
+It was a file in `apps/pipeline` while the CLI was the only deployable. Two copies of the
+join that decides how long to wait before calling money late is two copies that can
+disagree. See [ADR-0055](../../docs/adr/0055-the-policy-join-is-a-package.md).
+
+## API
+
+    buildPolicy(db, merchantId) -> PolicyLookup
+
+This package imports several others and is imported only by applications. That shape
+otherwise belongs to a deployable, and it is intentional here.

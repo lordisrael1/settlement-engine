@@ -108,7 +108,7 @@ export interface FeeBreakdown {
 /**
  * `null` when no contract covers that moment, channel and currency — an honest "we cannot
  * predict this", which the matcher turns into matching on amounts alone rather than into a
- * false variance against a rate nobody agreed to (D-026).
+ * false variance against a rate nobody agreed to (ADR-0026).
  */
 export type FeeModel = (
   gross: Money,

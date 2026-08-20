@@ -10,13 +10,13 @@ import { transition } from './state.js';
 /**
  * Undo a transaction by writing its mirror image — never by touching it.
  *
- * This is Law 2 made operational. The original entries stay exactly as they were
+ * Append-only, made operational. The original entries stay exactly as they were
  * written, and a second transaction with every amount negated cancels their effect on
  * every balance. An auditor replaying the history sees both the mistake and the
  * correction, which is the only honest account of what happened.
  *
  * The reversal's id is derived from the original's, so reversing twice collides on the
- * primary key and the second attempt is a no-op (Law 4) rather than a second refund.
+ * primary key and the second attempt is a no-op (idempotency) rather than a second refund.
  *
  * This is the *mechanical* primitive: an exact negation. Booking a refund as
  * contra-income against the `reversals` account is a different, domain-level decision

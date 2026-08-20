@@ -185,9 +185,9 @@ test('a source without a fixture-verified export format says so plainly', () => 
 });
 
 /**
- * Law 7, as a test. The two adapters read completely different foreign shapes — an
- * envelope of payouts, and a bare array of transactions — and produce values of one type
- * with one set of field names. Nothing downstream can tell them apart.
+ * The canonical boundary, as a test. The two adapters read completely different foreign
+ * shapes — an envelope of payouts, and a bare array of transactions — and produce values
+ * of one type with one set of field names. Nothing downstream can tell them apart.
  */
 test('different sources produce identically shaped results', () => {
   const a = flutterwave();

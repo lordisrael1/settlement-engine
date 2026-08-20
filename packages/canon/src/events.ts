@@ -1,24 +1,22 @@
 /**
  * The event log — everything that happened, in the order it happened, never edited.
  *
- * The tables built in Phases 1 to 4 record the *current* answers: what the balances are,
+ * The ledger and reconciliation tables record the *current* answers: what the balances are,
  * which payouts are confirmed, which exceptions are open. Each of them is append-only, so
  * each holds its own history. What none of them holds is the history of the whole system as
  * one ordered narrative — and that is the thing an auditor asks for. "Show me everything
  * that happened to this money, in order" currently means joining six tables and hoping.
  *
- * **On the deviation from the doctrine, stated plainly.** The bible says the event log
- * becomes the true system of record and the ledger becomes a projection folded from it.
- * Taken literally that inverts the write path built in Phase 1, and it moves Law 1 out of
- * the database: today an unbalanced transaction is refused by a deferred constraint trigger
- * at `COMMIT`, which a rogue script cannot walk past, whereas under a log-first design the
- * primary write is an event insert and "balanced" becomes something application code
- * promises. For a financial ledger that trades a database-enforced invariant for an
- * application-enforced one, which is strictly worse.
+ * The log is written beside the ledger rather than instead of it. A log-first design, where
+ * the primary write is an event insert and the ledger is folded from it, would move the
+ * balance-zero invariant out of the database: today an unbalanced transaction is refused by a
+ * deferred constraint trigger at `COMMIT` that no script can walk past, whereas under a
+ * log-first design "balanced" becomes something application code promises. For a financial
+ * ledger that trades a database-enforced invariant for an application-enforced one.
  *
  * So the log is written **in the same database transaction** as the state change that causes
  * it, and `replay` folds it into projections and asserts they equal the live state. Every
- * property the doctrine wanted — replayable from genesis, auditable as one narrative,
+ * property wanted of an event log — replayable from genesis, auditable as one narrative,
  * provable rather than asserted — holds. What is not done is making the log the only writer.
  * The two records are written together and checked against each other, which is a stronger
  * position than either alone: a bug in the ledger writer and a bug in the event writer would
@@ -116,8 +114,8 @@ export function isBookingEvent(type: DomainEventType): boolean {
  * One thing that happened.
  *
  * `eventId` is derived from the type and the subject, never generated. A `randomUUID` would
- * make the same event replay to a different log, which is the opposite of what Law 5 asks
- * for — and it would let a retried request append the same happening twice.
+ * make the same event replay to a different log, and it would let a retried request append
+ * the same happening twice.
  *
  * `occurredAt` and `recordedAt` are separate because they answer different questions. A
  * payout that moved on Tuesday and was ingested on Thursday is one event with two dates, and
@@ -131,7 +129,7 @@ export interface DomainEvent {
   readonly source: SourceId | null;
   /** When it happened in the world. */
   readonly occurredAt: Date;
-  /** When we learned of it. Never used to derive a number (Law 5). */
+  /** When we learned of it. Never used to derive a number (determinism). */
   readonly recordedAt: Date;
   /**
    * What it did to the books. Empty for events that moved no value, which is most of them.

@@ -26,7 +26,7 @@ export type EvidenceKind =
  * The immutable record of a document we reasoned from.
  *
  * The identity is the **SHA-256 of the bytes**, which makes re-uploading the same file a
- * no-op by construction rather than by convention (Law 4 again, one layer up), and makes
+ * no-op by construction rather than by convention (idempotency again, one layer up), and makes
  * "is this the file we used?" answerable by anyone with the file and no access to us.
  *
  * `parserVersion` is here because a parser is part of the reasoning. When a settlement
@@ -103,7 +103,7 @@ export interface EntryDraft {
  * **Appended, never applied in place.** A reviewer does not edit a match, change an
  * amount, or clear an exception — they add a statement saying what they concluded, who
  * they are, when, why, and what they were looking at. The exception's own history stays
- * exactly as it was, which is the same discipline Law 2 imposes on the ledger, extended to
+ * exactly as it was, which is the same append-only discipline the ledger obeys, extended to
  * the judgements made about it.
  *
  * The consequence worth stating plainly: a wrong human decision is corrected by a second
@@ -113,7 +113,7 @@ export interface EntryDraft {
 export interface Resolution {
   /**
    * The natural key of the decision, so that a retried request appends one resolution
-   * rather than two (Law 4). Also the identity of the compensating ledger transaction it
+   * rather than two (idempotency). Also the identity of the compensating ledger transaction it
    * posts, if it posts one — one decision, one booking, one id.
    */
   readonly resolutionKey: IdempotencyKey;

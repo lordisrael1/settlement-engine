@@ -49,7 +49,7 @@ export interface BankStatementContext extends Omit<EvidenceContext, 'kind' | 'so
  *
  * Amounts are decimal-string naira, because that is what every bank export contains and
  * converting once here — with string math, never a float — is the whole point of a
- * boundary (Law 3).
+ * boundary (integer kobo).
  */
 interface RawStatementRow {
   readonly id?: unknown;
@@ -188,7 +188,7 @@ function tokenise(narration: string): string[] {
   return [...new Set(narration.toUpperCase().match(/[A-Z0-9][A-Z0-9_-]{5,}/g) ?? [])];
 }
 
-/** Decimal-string naira into integer kobo, with string math only (Law 3). */
+/** Decimal-string naira into integer kobo, with string math only (integer kobo). */
 function nairaToKobo(value: unknown): bigint | null {
   const text =
     typeof value === 'number'

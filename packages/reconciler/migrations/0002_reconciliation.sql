@@ -4,8 +4,8 @@
 -- would send, and what the bank says arrived — plus the evidence both came from and the
 -- record of every conclusion drawn, by a machine or by a person.
 --
--- Phase 2 deliberately left settlement records nowhere to live: ingest has no database
--- (D-020). This is the right place, and their arrival here is what makes idempotency
+-- The ingest layer deliberately leaves settlement records nowhere to live: it has no database
+-- (ADR-0020). This is the right place, and their arrival here is what makes idempotency
 -- durable across restarts rather than only within a run.
 
 -- btree_gist lets an exclusion constraint mix equality on text with overlap on a range,
@@ -88,7 +88,7 @@ CREATE TABLE payouts (
   expected_net_kobo BIGINT NOT NULL,
   currency          TEXT   NOT NULL,
   -- Named deductions: [{kind, kobo, narration}]. Kobo as text inside the document, never
-  -- a JSON number — a JSON number is a double, and a double is not a ledger amount (Law 3).
+  -- a JSON number: a JSON number is a double, and a double is not a ledger amount.
   adjustments       JSONB  NOT NULL DEFAULT '[]',
 
   reported_at       TIMESTAMPTZ NOT NULL,
@@ -291,7 +291,7 @@ CREATE TABLE resolutions (
 CREATE INDEX resolutions_subject_idx ON resolutions (subject, subject_id);
 
 -- ---------------------------------------------------------------------------
--- Law 2, extended from the ledger to the judgements made about it.
+-- Append-only, extended from the ledger to the judgements made about it.
 --
 -- `expected_inflows` is deliberately absent: confirmation sets `confirmed_by` once, and a
 -- partial unique index already makes a second confirmation impossible. Everything else

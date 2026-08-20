@@ -1,16 +1,13 @@
-# You do not containerise the packages. You containerise the app — and the packages come
-# along for the ride, because the app depends on them. From the app's point of view
-# @recon/ledger-core is a dependency no different in kind from Fastify; the only difference
-# is that it comes from this repo instead of the registry. Both end up inside the image.
+# Multi-stage build for the API service. The workspace packages are compiled into the image
+# as dependencies of the app, no differently from any registry dependency.
 
 FROM node:20-alpine AS build
 WORKDIR /app
 
 # Manifests first, so a source-only change does not re-run the install. npm needs every
-# workspace manifest present to resolve the internal links, hence the one-by-one copies —
-# `COPY packages/*/package.json` flattens the paths and would land them all on top of each
-# other. A new workspace must be added to this list; leaving it out fails `npm ci` at build
-# time with the missing package named, which is the right place for that to be noticed.
+# workspace manifest present to resolve the internal links, and the copies are one by one
+# because `COPY packages/*/package.json` flattens the paths. Add new workspaces here; an
+# omission fails `npm ci` at build time with the missing package named.
 COPY package.json package-lock.json ./
 COPY packages/canon/package.json       packages/canon/
 COPY packages/ledger-core/package.json packages/ledger-core/
@@ -22,8 +19,7 @@ COPY packages/simulator/package.json   packages/simulator/
 COPY apps/pipeline/package.json        apps/pipeline/
 COPY apps/api/package.json             apps/api/
 
-# `npm ci` installs exactly what the lockfile says — the difference between a
-# reproducible image and one that quietly picks up a new minor version next Tuesday.
+# `npm ci` installs exactly what the lockfile pins, so the image is reproducible.
 RUN npm ci
 
 COPY tsconfig.base.json tsconfig.json ./
@@ -33,7 +29,7 @@ COPY apps apps
 # Project references make tsc build the packages before the app that imports them.
 RUN npm run build
 
-# Drop the toolchain now that the JavaScript exists; nothing at runtime needs TypeScript.
+# Nothing at runtime needs TypeScript.
 RUN npm prune --omit=dev
 
 
@@ -46,19 +42,16 @@ COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/packages     ./packages
 COPY --from=build /app/apps         ./apps
 
-# Never root. A process that only reads its own code and talks to Postgres has no use
-# for the privileges root would give an attacker who reached it.
+# The process only reads its own code and talks to Postgres, so it does not run as root.
 USER node
 
-# The database lives in its own container; the address arrives as configuration, and no
-# secret is ever baked into the image. RECON_API_KEY and the per-source webhook secrets
-# arrive the same way — the service refuses to start without the first (D-052).
+# The database address and every secret arrive as configuration; nothing is baked into the
+# image. The service refuses to start without RECON_API_KEY.
 ENV DATABASE_URL=""
 ENV PORT=8080
 
 EXPOSE 8080
 
-# The line that decides what this image *is*. The CLI is still in here and still runs —
-# `docker compose run --rm api node apps/pipeline/dist/main.js balances` — because one set
-# of libraries with two ways to run them is the whole point of the apps/packages split.
+# The default command. The CLI is in the same image and runs by overriding it:
+#   docker compose run --rm api node apps/pipeline/dist/main.js balances
 CMD ["node", "apps/api/dist/main.js"]

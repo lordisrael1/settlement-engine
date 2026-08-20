@@ -58,8 +58,8 @@ const MIGRATIONS = [LEDGER_MIGRATIONS_DIR, RECONCILER_MIGRATIONS_DIR];
  * process you start. It owns no business logic — it opens a connection, dispatches a
  * command, and prints. Every decision it appears to make is delegated to a package.
  *
- * Phase 6 replaces this entry point with a Fastify service. The libraries do not change
- * when that happens, which is the whole point of keeping them libraries.
+ * `apps/api` serves the same libraries over HTTP. Neither deployable changes the packages,
+ * which is the point of keeping them libraries.
  */
 const COMMANDS = [
   'migrate',
@@ -96,7 +96,7 @@ async function main(argv: readonly string[]): Promise<number> {
       case 'demo': {
         await runMigrations(pool, MIGRATIONS);
         heading('Record the fast promise, wait for the slow money');
-        line('  Phases 1 and 2, end to end, against a real Postgres.');
+        line('  The whole system, end to end, against a real Postgres.');
         line(`  Sources with an adapter: ${SOURCE_IDS.join(', ')}`);
         const ok = await runDemo(pool);
         line(ok ? '\x1b[32mAll invariants held.\x1b[0m' : '\x1b[31mAn invariant failed.\x1b[0m');
@@ -104,7 +104,7 @@ async function main(argv: readonly string[]): Promise<number> {
       }
 
       /**
-       * Phase 8, driven rather than asserted.
+       * The adversarial scenario, driven rather than asserted.
        *
        * Generates one messy settlement day from a seed, pushes every byte of it through the
        * real boundary in whatever order was asked for, and reports what a human is left
@@ -176,7 +176,7 @@ async function main(argv: readonly string[]): Promise<number> {
         }
 
         // Storing the file and the records is what makes re-ingesting the same export a
-        // no-op across restarts rather than only within one process (D-020), and what
+        // no-op across restarts rather than only within one process (ADR-0020), and what
         // makes the conclusion reproducible from the bytes months later.
         await recordEvidence(pool, result.evidence, bytes);
         const payouts = await recordPayouts(pool, result.payouts);
@@ -250,9 +250,8 @@ async function main(argv: readonly string[]): Promise<number> {
         line('  balance cache, and the event log — written by three different code paths.');
         line();
 
-        // `--rebuild` throws the cache away first, which is the doctrine's exit criterion
-        // done rather than argued. Without it this is a read-only proof, safe to run on a
-        // schedule against production.
+        // `--rebuild` discards the cache first and rebuilds it from the log. Without it
+        // this is a read-only proof, safe to run on a schedule against production.
         const rebuild = argv.includes('--rebuild');
         const report = rebuild ? await rebuildBalancesFromEvents(pool) : await replay(pool);
 

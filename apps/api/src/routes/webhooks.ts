@@ -17,7 +17,7 @@ import type { Services } from '../services.js';
  *
  * Step 4 is one insert. It does not normalise the payload, post to the ledger, match
  * anything, refresh a projection or send a notification — a worker does all of that, later,
- * from the row this wrote (D-050). The promise being made to the provider is exactly *"we
+ * from the row this wrote (ADR-0050). The promise being made to the provider is exactly *"we
  * safely received this event"*, which is the only promise that can be kept in a couple of
  * milliseconds at a thousand deliveries a second, and the only one that stays true when the
  * matcher is busy.

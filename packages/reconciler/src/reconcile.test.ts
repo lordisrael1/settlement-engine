@@ -345,7 +345,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
   });
 
   /**
-   * Law 4 across a whole run. A reconciliation retried — because the process died, a cron
+   * Idempotency across a whole run. A reconciliation retried — because the process died, a cron
    * overlapped, or somebody ran it twice — must move exactly no money the second time.
    */
   test('running the same reconciliation twice moves nothing', async () => {
@@ -769,7 +769,7 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
     assert.deepEqual(await resolutionsFor(pool, 'bank_credit', id('bank-x')), []);
   });
 
-  /** A retried request appends one decision and books once (Law 4, on the human half). */
+  /** A retried request appends one decision and books once (idempotency, on the human half). */
   test('recording the same resolution twice books once', async () => {
     const { id } = scenario();
     const resolution = {

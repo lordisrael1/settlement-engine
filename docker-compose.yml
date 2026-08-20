@@ -1,11 +1,7 @@
-# The whole system, as one unit: the service and the database it needs.
+# The service and the database it needs, as one unit.
 #
 #   docker compose up --build        run it
-#   docker compose down -v           throw the ledger away and start from an empty history
-#
-# The database is a separate container because Postgres is not part of our app — it is
-# its own program with its own world. Composing them here is what turns two images into
-# one system.
+#   docker compose down -v           discard the ledger and start from an empty history
 
 services:
   postgres:
@@ -15,15 +11,14 @@ services:
       POSTGRES_PASSWORD: recon
       POSTGRES_DB: recon
     ports:
-      # Exposed for local inspection with psql. Remove this line for any deployment
-      # where the database should only be reachable from the service.
+      # Exposed for local inspection with psql. Remove for any deployment where the
+      # database should only be reachable from the service.
       - '5432:5432'
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      # The service must not start migrating against a Postgres that is still booting;
-      # "the container is running" and "the database accepts connections" are not the
-      # same event, and the gap between them is where flaky startups live.
+      # The service must not start migrating against a Postgres that is still booting.
+      # A running container and a database accepting connections are not the same event.
       test: ['CMD-SHELL', 'pg_isready -U recon -d recon']
       interval: 2s
       timeout: 3s
@@ -38,30 +33,27 @@ services:
       - '8080:8080'
     environment:
       DATABASE_URL: postgres://recon:recon@postgres:5432/recon
-      # Development values, and obviously so. A deployment supplies these from its own
-      # secret store; nothing here is ever baked into the image. The service refuses to
-      # start without an API key rather than quietly serving the management endpoints
-      # unauthenticated (D-052).
+      # Development values. A deployment supplies these from its own secret store, and
+      # nothing here is baked into the image. The service refuses to start without an API
+      # key rather than serving the management endpoints unauthenticated.
       RECON_API_KEY: local-dev-key-0123456789
       # The secret each provider signs its deliveries with. A source with no secret gets a
-      # 503 and nothing is stored — an honest "we cannot authenticate this" rather than a
-      # payment accepted on trust. These two match the demo's fixtures.
+      # 503 and stores nothing. These two match the demo's fixtures.
       RECON_WEBHOOK_SECRET_PAYSTACK: sk_test_demo_secret
       RECON_WEBHOOK_SECRET_FLUTTERWAVE: flw_test_demo_secret_hash
       RECON_MERCHANT: demo-merchant
       RECON_BANK_ACCOUNT: gtb-3011
       RECON_BANK: gtbank
     healthcheck:
-      # Reports the database *and* how far behind the inbox workers are. A service that
-      # accepts deliveries and quietly stops working them is the failure this architecture
-      # is most exposed to, and a bare "the port is open" check would hide it completely.
+      # Reports the database and how far behind the inbox workers are. A port-open check
+      # would hide a service that accepts deliveries and stops working them.
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:8080/health || exit 1']
       interval: 10s
       timeout: 3s
       retries: 6
 
-  # The other deployable, over the same libraries and the same image. Not started with the
-  # system — it is run on demand:
+  # The CLI deployable, over the same libraries and the same image. Not started with the
+  # system; run on demand:
   #
   #   docker compose run --rm cli node apps/pipeline/dist/main.js demo
   #   docker compose run --rm cli node apps/pipeline/dist/main.js replay --rebuild

@@ -38,11 +38,11 @@ export interface Accepted {
 /**
  * The identity of a delivery: SHA-256 over the source and the bytes.
  *
- * Derived, never generated (D-014). Two consequences, both load-bearing. A provider
+ * Derived, never generated (ADR-0014). Two consequences, both load-bearing. A provider
  * redelivering — which every provider does, and does on a timer — collides on the primary
  * key instead of on somebody remembering to check. And the id is computable by anyone
  * holding the same bytes, so "is this the delivery you got?" is answerable without us,
- * exactly as an evidence id is (D-033).
+ * exactly as an evidence id is (ADR-0033).
  *
  * The source is in the digest because two providers can legitimately send byte-identical
  * bodies, and they are not the same event.
@@ -124,7 +124,7 @@ export interface DrainOptions {
    * problem. A poison payload retried forever is an infinite loop with a log file.
    */
   readonly maxAttempts?: number;
-  /** The clock, as an argument (Law 5). */
+  /** The clock, as an argument (determinism). */
   readonly at: Date;
 }
 
@@ -152,7 +152,7 @@ const DEFAULTS = { limit: 100, maxAttempts: 8 };
  * Two workers never fight over a row and never wait on each other; a worker that dies
  * mid-delivery releases its lock on disconnect and the delivery is simply claimed again.
  * Nothing is lost, and nothing is double-booked either — the ledger transaction id is the
- * payment's idempotency key, so the second attempt collides on the primary key (D-014).
+ * payment's idempotency key, so the second attempt collides on the primary key (ADR-0014).
  */
 export async function drain(
   db: Pool,

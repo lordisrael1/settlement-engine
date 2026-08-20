@@ -21,7 +21,7 @@ export interface EntryInput {
 }
 
 export interface PostTransactionInput {
-  /** The causing event's idempotency key. Posting it twice is a no-op (Law 4). */
+  /** The causing event's idempotency key. Posting it twice is a no-op (idempotency). */
   readonly transactionId: TransactionId;
   readonly source: SourceId;
   readonly reference: Reference;
@@ -60,8 +60,8 @@ export interface PostTransactionResult {
  * Record one economic event.
  *
  * The write is atomic in the strong sense: the transaction row, its entries, its initial
- * lifecycle state and the balance-cache updates either all land or none do, and Law 1's
- * deferred trigger gets the final say at COMMIT. There is no interleaving in which a
+ * lifecycle state and the balance-cache updates either all land or none do, and the deferred
+ * balance-zero trigger gets the final say at COMMIT. There is no interleaving in which a
  * reader can observe half an event or an unbalanced one.
  *
  * Redelivery is not an error. A second post of the same event returns
@@ -161,7 +161,7 @@ export async function postTransaction(
 
 /**
  * Entry ids are derived, not generated. A random id would make the same event replay to a
- * different database, which is the opposite of what Law 5 asks for.
+ * different database, which would break determinism.
  */
 export function entryId(transactionId: TransactionId, ordinal: number): string {
   return `${transactionId}#${ordinal}`;

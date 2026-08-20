@@ -31,7 +31,7 @@ import type { SettlementSource } from './settlement/types.js';
 /**
  * Everything the system knows about one payment source, in one place.
  *
- * This is how Law 7 survives contact with reality. Sources genuinely do differ — they cut
+ * This is how the canonical boundary survives contact with reality. Sources do differ — they cut
  * off at different times, settle on different schedules, and charge different rates — and
  * pretending otherwise would just push the difference somewhere less visible. So the
  * difference is captured *as data*, here, at the boundary. Downstream code asks a profile
@@ -155,7 +155,7 @@ export function sourceProfile(source: SourceId): SourceProfile {
  * Nomba is absent on purpose. It prices per merchant with no public card, so there is
  * nothing honest to seed: the matcher will match its payments on amount and report the fee
  * it observed, rather than generating a permanent stream of variances against a rate
- * nobody ever quoted (D-026).
+ * nobody ever quoted (ADR-0026).
  *
  * Two contracts per source, not one: the card rate is a percentage and the transfer rate is
  * ten naira flat, and a single blended contract would predict the card fee for every

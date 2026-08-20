@@ -158,7 +158,7 @@ describe('the service', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run'
     ]);
 
     // The clock is an argument, so the suite owns it. Nothing here waits for a real day to
-    // pass to find out whether a settlement window closed (Law 5).
+    // pass to find out whether a settlement window closed (determinism).
     app = buildApp({ pool, config: CONFIG, now: () => NOW });
     await app.ready();
   });
@@ -289,7 +289,7 @@ describe('the service', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run'
     assert.notEqual(worked?.transactionId, null);
 
     // Revenue at gross, the receivable open, and no fee booked — the fee is not knowable
-    // yet, and a guess in the books is a correction waiting to happen (D-004).
+    // yet, and a guess in the books is a correction waiting to happen (ADR-0004).
     assert.equal(await balanceOf('psp_receivable'), 1_000_000n);
     assert.equal(await balanceOf('merchant_revenue'), -1_000_000n);
     assert.equal(await balanceOf('fees_expense'), 0n);
@@ -350,7 +350,7 @@ describe('the service', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run'
     assert.equal(report.processed, 3);
 
     // Nothing above this line knew which provider it was talking to except the connector.
-    // Amounts in naira there, kobo here — converted once, at the boundary (Law 3).
+    // Amounts in naira there, kobo here — converted once, at the boundary (integer kobo).
     assert.equal(await balanceOf('psp_receivable'), before + 1_200_000n);
   });
 
@@ -365,7 +365,7 @@ describe('the service', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run'
     });
 
     // Paystack's export has no fixture-verified column layout, so there is no parser.
-    // Inventing one produces a parser that looks right and books the wrong amounts (D-025).
+    // Inventing one produces a parser that looks right and books the wrong amounts (ADR-0025).
     assert.equal(response.statusCode, 501);
   });
 
@@ -403,7 +403,7 @@ describe('the service', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run'
     assert.equal(second.payouts.duplicates, 1);
 
     // The uploader is recorded, because "who put this in front of us" is one of the
-    // questions actually asked six months later (D-033).
+    // questions actually asked six months later (ADR-0033).
     const evidence = await pool.query<{ received_from: string; filename: string | null }>(
       'SELECT received_from, filename FROM evidence WHERE evidence_id = $1',
       [body.evidenceId],
@@ -457,7 +457,7 @@ describe('the service', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run'
     assert.equal(new Date(run.asOf).getTime(), NOW.getTime());
     assert.deepEqual(run.failures, []);
     // A credit naming a payout we hold no promises for cannot be identified, and the
-    // matcher escalates rather than guessing (D-035).
+    // matcher escalates rather than guessing (ADR-0035).
     assert.equal(run.exceptions.length > 0, true);
     assert.equal(run.queue.raised > 0, true);
   });
@@ -528,7 +528,7 @@ describe('the service', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run'
     assert.equal(malformed.statusCode, 400);
 
     // Maker-checker: one person named twice is one person. Refused by the engine, and
-    // independently by a database constraint (D-042).
+    // independently by a database constraint (ADR-0042).
     const selfApproved = await resolve({
       resolutionKey: 'api-test:self-approved',
       action: 'write_off',

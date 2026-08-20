@@ -21,7 +21,7 @@ import { inTransaction, type Executor } from './pool.js';
  * is evidence rather than tautology.
  *
  * Nothing here reads a clock or takes an `asOf`. A replay is a statement about what the
- * record says, and the answer must be the same in March and in December (Law 5).
+ * record says, and the answer must be the same in March and in December (determinism).
  */
 
 const PAGE = 500;
@@ -93,8 +93,8 @@ async function balanceDrift(
  * The log against the entries themselves.
  *
  * A separate check from the cache, and not a redundant one: the cache could agree with the
- * log while both disagree with the entries, which are the only thing the Law 1 trigger
- * actually guards. This is the comparison that catches a booking event carrying entries the
+ * log while both disagree with the entries, which are the only thing the balance-zero
+ * trigger actually guards. This is the comparison that catches a booking event carrying entries the
  * ledger never wrote.
  */
 async function entryDrift(
@@ -167,11 +167,11 @@ async function exceptionDrift(db: Executor): Promise<ProjectionDrift[]> {
 /**
  * Throw the balance cache away and rebuild it from the log alone.
  *
- * The bible's exit criterion, executed rather than argued: delete the projection, replay
- * from event zero, and the numbers come back. It is safe precisely because
+ * Delete the projection, replay from event zero, and the numbers come back. It is safe
+ * precisely because
  * `account_balances` is a cache and was never protected by an append-only trigger — the
- * entries are the truth, and this table has always been a convenience that Law 6 keeps
- * honest.
+ * entries are the truth, and this table has always been a convenience that the cache
+ * check keeps honest.
  *
  * Returns the report from the *rebuilt* state, so a caller can assert in one step that the
  * rebuild reproduced the ledger rather than merely completing.

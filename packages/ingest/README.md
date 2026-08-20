@@ -1,96 +1,85 @@
-# @recon/ingest — Phase 2 ✅
+# @recon/ingest
 
-**The anti-corruption boundary.** The outside world is impure and various. That variety is
-quarantined here and converted, exactly once, into `@recon/canon` types, so the core never
+The anti-corruption boundary. Provider bytes in, `@recon/canon` types out, so the core never
 sees a foreign shape.
 
-**Depends on:** `@recon/canon`, `@pay-normalize/*`.
-**Imported by:** `apps/*`.
+**Depends on:** `@recon/canon`, `@pay-normalize/*`. **Imported by:** `@recon/policy`,
+`apps/*`.
 
-It deliberately does **not** depend on `@recon/ledger-core`, and it has **no database**.
-Ingest's job ends when it has produced a clean canonical event; deciding what to do with
-that event, and remembering that it happened, belong to layers that are allowed to own
-state. That missing edge is what keeps ingest a pure translator — bytes in, canonical
-events out, no clock, no network, no I/O.
+It does not depend on `@recon/ledger-core` and owns no database. Ingest's job ends when it
+has produced a clean canonical event; deciding what to do with that event, and remembering
+it happened, belong to layers allowed to own state. No clock, no network, no I/O
+([ADR-0020](../../docs/adr/0020-ingest-has-no-database.md)).
 
-## This package is thin on purpose
+## This package is thin
 
-`@pay-normalize/*` already contains the genuinely hard knowledge, and it is published, so
-we import it rather than reimplement it:
+`@pay-normalize/*` already contains the hard knowledge and is published, so it is imported
+rather than reimplemented.
 
-| Already solved upstream | Added here |
+| Solved upstream | Added here |
 |---|---|
-| Four HMAC signature schemes, verified over raw bytes with `timingSafeEqual` | The last translation into `Money`/`CanonicalPayment`/`SettlementLine` |
-| Five amount conventions → integer kobo, via string/BigInt math, never `parseFloat` | Widening their safe-integer kobo to our `bigint` |
-| Per-provider timezone rules and status vocabularies | The **expected settlement window** per source |
-| `STATUS_RANK`, making out-of-order delivery safe | The **expected fee** per source (a rate card) |
-| Row-isolated settlement parsing that never throws on bad data | Dedupe as a pure function (Law 4) |
+| Four HMAC signature schemes, verified over raw bytes with `timingSafeEqual` | The translation into `Money`, `CanonicalPayment` and `SettlementLine` |
+| Five amount conventions to integer kobo, via string and BigInt math | Widening upstream safe-integer kobo to `bigint` |
+| Per-provider timezone rules and status vocabularies | The expected settlement deadline per source |
+| `STATUS_RANK`, making out-of-order delivery safe | The expected fee per source |
+| Row-isolated settlement parsing that never throws on bad data | Deduplication as a pure function |
 
-A stateless normalisation library deliberately has no opinion about *when money should
-have arrived* or *what it should have cost*. Those two facts are what reconciliation runs
-on, and they are this package's real contribution.
+A stateless normalisation library has no opinion about when money should have arrived or
+what it should have cost. Those two facts are what reconciliation runs on, and they are this
+package's contribution ([ADR-0012](../../docs/adr/0012-pay-normalize-as-an-npm-dependency.md)).
 
 ## Two halves
 
-**The promise half** — [`webhook.ts`](src/webhook.ts). Verify the signature, *then* parse.
-That order is a security property, not a preference: parsing before verifying means
-running a parser over bytes any stranger on the internet can choose.
+**Webhooks** — [`webhook.ts`](src/webhook.ts). Verify the signature, then parse. That order
+is a security property: parsing first means running a parser over bytes any stranger can
+choose.
 
-**The money half** — [`settlement/`](src/settlement/). One adapter per source, each
-running the same fixed pipeline:
+**Settlement** — [`settlement/`](src/settlement/). One adapter per source, each running the
+same pipeline:
 
-```
-parse      bytes → structure          (JSON envelope, or a bare array of records)
-validate   reject implausible rows at the boundary — including rows whose own
-           gross/fee/net disagree, which no amount of matching can rescue
-normalize  map onto canonical fields; convert to bigint kobo HERE and nowhere else
-dedupe     drop what we have already seen (a separate, injectable step)
-                          ↓
+    parse      bytes -> structure (a JSON envelope, or a bare array of records)
+    validate   reject implausible rows, including rows whose own gross/fee/net disagree
+    normalize  map onto canonical fields; convert to bigint kobo here and nowhere else
+    dedupe     drop what has already been seen (a separate, injectable step)
+                          |
+                          v
                    SettlementLine[]
-```
 
-## Per-source data, never per-source branching
+## Per-source data, not per-source branching
 
-[`sources.ts`](src/sources.ts) is how Law 7 survives contact with reality. Sources
-genuinely do differ, and pretending otherwise just pushes the difference somewhere less
-visible. So the difference is captured **as data**, at the boundary:
+[`sources.ts`](src/sources.ts) holds the differences as data, at the boundary. Downstream
+code asks a profile what the deadline is; it never asks which source this is.
 
-| Source | Webhooks | Settlement | Window | Rate card |
+| Source | Webhooks | Settlement | Deadline | Rate card |
 |---|---|---|---|---|
-| `paystack` | ✅ | — *(see below)* | T+2 | 1.5% + ₦100, waived < ₦2,500, cap ₦2,000 |
-| `flutterwave` | ✅ | ✅ settlements API v4 | T+2 | 1.4%, cap ₦2,000 |
-| `nomba` | ✅ | ✅ transaction records | T+1 | `null` — priced per merchant |
-| `monnify` | ✅ | ✅ transaction records | T+1 | 1.5%, cap ₦2,000 |
+| `paystack` | yes | none | T+2 | 1.5% + 100, waived below 2,500, capped at 2,000 |
+| `flutterwave` | yes | settlements API v4 | T+2 | 1.4%, capped at 2,000 |
+| `nomba` | yes | transaction records | T+1 | none — priced per merchant |
+| `monnify` | yes | transaction records | T+1 | 1.5%, capped at 2,000 |
 
-Downstream code asks a profile what the window is. It never asks which source this is.
-Adding a source is one row in that table.
+Adding a source is one adapter and one row.
 
-**The window is a deadline, not an expectation.** T+1 channels get a T+2 window because
-the window marks the point at which silence becomes an exception a human is woken for —
-set it to the expected arrival time and every weekend becomes an incident.
+- **The window is a deadline, not an expectation.** T+1 channels get a T+2 window, because
+  the window marks the point at which silence becomes an exception someone is alerted to.
+- **`expectedFee` may be `null`,** and Nomba's is. It prices per merchant, so there is no
+  published card to encode, and a guess would produce a permanent stream of false
+  fee-variance findings ([ADR-0026](../../docs/adr/0026-deadline-windows-and-nullable-rate-cards.md)).
+- **Paystack has no settlement adapter.** Its connector refuses to parse settlement exports
+  until a sanitized real file pins the column layout, so `ingestSettlement('paystack', ...)`
+  throws `NoSettlementAdapterError`. Its webhook half works fully
+  ([ADR-0025](../../docs/adr/0025-no-paystack-settlement-adapter.md)).
 
-**`expectedFee` may be `null`**, and Nomba's is. It prices per merchant, so there is no
-public card to encode, and `null` is the honest value — the reconciler will match on
-reference and exact amount rather than pretend to predict a fee.
+## Rate cards are checked against the provider's own arithmetic
 
-**Paystack has no settlement adapter.** Its connector refuses to parse settlement exports
-until a sanitized real file pins the column layout, and inventing one here would produce a
-parser that looks right and is wrong. `ingestSettlement('paystack', …)` throws
-`NoSettlementAdapterError` and says so. Its promise half works fully in the meantime.
+Paystack states the fee it charged in its webhook payload, so `fees.test.ts` checks the model
+against Paystack rather than against a reading of their pricing page, on three amounts that
+each land on a different branch of the card:
 
-## The rate cards are checked against the provider's own arithmetic
-
-Paystack states the fee it charged in its own webhook payload, so `fees.test.ts` checks
-the model against Paystack rather than against our reading of their pricing page — on
-three amounts that each land on a different branch of the card:
-
-| Gross | Branch exercised | Predicted | Paystack charged |
+| Gross | Branch | Predicted | Charged |
 |---|---|---|---|
-| ₦100 | flat waived below ₦2,500 | ₦1.50 | ₦1.50 |
-| ₦2,500 | exactly at the waiver threshold | ₦137.50 | ₦137.50 |
-| ₦10,000 | percentage + flat | ₦250.00 | ₦250.00 |
+| 100 | flat waived below 2,500 | 1.50 | 1.50 |
+| 2,500 | exactly at the waiver threshold | 137.50 | 137.50 |
+| 10,000 | percentage plus flat | 250.00 | 250.00 |
 
-Rate cards drift. When one does, it shows up as a rising `FEE_VARIANCE` count rather than
-a wrong balance, because the fee actually charged always wins.
-
-See [the bible, Phase 2](../../docs/RECONCILIATION-BIBLE.md#phase-2--the-ingest-layer-the-anti-corruption-boundary).
+When a rate card drifts it shows up as a rising `FEE_VARIANCE` count rather than a wrong
+balance, because the fee actually charged always wins.

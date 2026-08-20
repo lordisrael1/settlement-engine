@@ -52,7 +52,7 @@ export interface SettlementIngestResult {
  * One adapter per settlement source. The whole variety of the outside world — JSON
  * envelopes, row arrays, and whatever the next source speaks — is contained behind this
  * one method, so that everything downstream sees canonical records and cannot tell the
- * difference (Law 7).
+ * difference (the canonical boundary).
  *
  * Deliberately synchronous and pure: bytes in, canonical events out. No network, no clock,
  * no database. Fetching the bytes is the caller's business, and deduplicating the result

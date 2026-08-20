@@ -15,12 +15,12 @@
  *   money in the bank.
  *
  *   **The matcher is pure.** Both stages are functions of their arguments — no clock, no
- *   database, no network. Same inputs, same partition, forever (Law 5), which is what
+ *   database, no network. Same inputs, same partition, forever (determinism), which is what
  *   makes a reconciliation auditable rather than merely plausible.
  *
  *   **It never learns which source it is looking at.** Everything per-source arrives as a
  *   `SourcePolicy`: a business calendar, a dated fee model, a bank-charge allowance. There
- *   is no source name in here to branch on, so Law 7 is not a rule anyone has to remember.
+ *   is no source name in here to branch on, so the canonical boundary holds structurally.
  *
  *   **It refuses to guess.** Two payouts that fit one credit equally well, a batch with
  *   two valid solutions, a shortfall bigger than a bank charge could be — all escalate.

@@ -2,14 +2,14 @@
  * @recon/canon — the canonical domain language.
  *
  * One definition of each domain concept, in one place, that everyone imports. This
- * package depends on nothing and everything depends on it: that is Law 7 (the canonical
- * boundary) expressed as code structure.
+ * package depends on nothing and everything depends on it, which is the canonical boundary
+ * expressed as code structure.
  *
  * Read the files in this order to learn the domain:
- *   money.ts        what an amount is                      (Law 3)
- *   accounts.ts     where value can sit                    (Appendix B)
- *   identifiers.ts  how events are named and deduped       (Law 4)
- *   ledger.ts       the double-entry record itself         (Laws 1, 2)
+ *   money.ts        what an amount is                      (integer kobo)
+ *   accounts.ts     where value can sit                    (the chart of accounts)
+ *   identifiers.ts  how events are named and deduped       (idempotency)
+ *   ledger.ts       the double-entry record itself         (balance-zero, append-only)
  *   payment.ts      record one — the promise, from a webhook
  *   settlement.ts   record two — one payment inside a PSP's payout report
  *   payout.ts       …and the payout itself, with its named deductions

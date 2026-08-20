@@ -5,11 +5,11 @@
 -- narrative, which is exactly what "show me everything that happened to this money, in
 -- order" needs. Today that question means joining six tables and hoping.
 --
--- On what this is and is not. The doctrine says the log should become the true system of
--- record and the ledger a projection folded from it. This log is written in the **same
+-- On what this is and is not. A log-first design would make this the true system of record
+-- and the ledger a projection folded from it. Instead this log is written in the **same
 -- database transaction** as the state change that causes it, and `replay` folds it and
 -- asserts the projections match. It is not the only writer, and deliberately so: inverting
--- the write path would move Law 1 out of the database, where a deferred constraint trigger
+-- the write path would move balance-zero out of the database, where a constraint trigger
 -- currently refuses an unbalanced transaction at COMMIT and no rogue script can walk past
 -- it, and into application code that merely promises to be right. Two records written
 -- together and checked against each other is a stronger position than either alone — a bug
@@ -22,7 +22,7 @@ CREATE TABLE events (
   sequence     BIGSERIAL PRIMARY KEY,
 
   -- Derived from the type and the subject, never generated. A random id would make the same
-  -- event replay to a different log (Law 5) and would let a retried request append the same
+  -- event replay to a different log (determinism) and would let a retried request append the same
   -- happening twice.
   event_id     TEXT NOT NULL UNIQUE,
   type         TEXT NOT NULL,
@@ -38,7 +38,7 @@ CREATE TABLE events (
 
   -- What it did to the books: [{account_id, kobo}]. Empty for the events that moved no
   -- value, which is most of them. Kobo as text inside the document, never a JSON number —
-  -- a JSON number is a double, and a double is not a ledger amount (Law 3).
+  -- a JSON number is a double, and a double is not a ledger amount.
   entries      JSONB NOT NULL DEFAULT '[]',
   -- Everything else worth keeping, in the event's own shape.
   detail       JSONB NOT NULL DEFAULT '{}',
@@ -51,7 +51,7 @@ CREATE INDEX events_subject_idx  ON events (subject, sequence);
 CREATE INDEX events_type_idx     ON events (type, sequence);
 CREATE INDEX events_occurred_idx ON events (occurred_at);
 
--- Law 2, at the scale of the whole system. This is the one table where an UPDATE would not
+-- Append-only, at the scale of the whole system. This is the one table where an UPDATE would not
 -- merely rewrite a fact but rewrite the record that proves every other fact.
 CREATE TRIGGER events_append_only
   BEFORE UPDATE OR DELETE ON events

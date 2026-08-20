@@ -3,7 +3,8 @@
  *
  * `SourceId` is deliberately an open `string`, not a union of known PSPs. A closed union
  * would mean adding a payment source requires editing the canonical language, and would
- * invite exhaustive `switch` statements downstream — exactly the branching Law 7 forbids.
+ * invite exhaustive `switch` statements downstream — exactly the branching the canonical
+ * boundary forbids.
  * A new source is one adapter in `packages/ingest` and nothing else.
  */
 
@@ -36,7 +37,7 @@ export type TransactionId = string;
 export type EntryId = string;
 
 /**
- * Law 4. The natural key of a real-world event: `source` + the source's reference.
+ * The natural key of a real-world event: `source` + the source's reference.
  * The same event arriving twice produces the same key, and the second arrival is dropped.
  */
 export type IdempotencyKey = string;
@@ -47,7 +48,7 @@ export type IdempotencyKey = string;
  * A payment, the settlement line that reports it, the payout that carries it and the bank
  * credit that proves it can all quote the same provider reference. They are four different
  * events about one payment, and collapsing any two of them onto one key would silently
- * drop one as a duplicate under Law 4 — losing exactly the independent second opinion the
+ * drop one as a duplicate — losing exactly the independent second opinion the
  * whole system is built to compare.
  */
 export type EventRail = 'payment' | 'settlement' | 'payout' | 'bank';

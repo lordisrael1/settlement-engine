@@ -4,7 +4,7 @@
  * `Math.random` would make a failing scenario unreproducible, which in an adversarial suite
  * is the same as not having found the bug: "the matcher escalated something on Tuesday" is
  * not a defect report. Every draw here comes from an integer seed, so a red build hands you
- * the one number needed to reproduce it exactly, on any machine, forever (Law 5).
+ * the one number needed to reproduce it exactly, on any machine, forever (determinism).
  *
  * `mulberry32` rather than a dependency: thirty-two bits of state and four operations, with
  * no cryptographic claim attached, because none is wanted. What is wanted is that the same

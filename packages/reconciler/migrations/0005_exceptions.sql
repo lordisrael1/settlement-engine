@@ -1,6 +1,6 @@
 -- The exception queue: differences nobody has explained, with lives of their own.
 --
--- Phase 3 produced conclusions and wrote them to `matches`. What it could not do is
+-- Matching produces conclusions and writes them to `matches`. What it cannot do is
 -- remember. Every run rediscovered the same unexplained difference, reported it again, and
 -- had no way to say whether a human had already looked at it, whether it had been open for
 -- a week, or whether it had quietly gone away.
@@ -8,7 +8,7 @@
 -- Note the shape, because it is deliberately the shape the ledger already uses for its own
 -- lifecycle: an append-only table of *events*, and a view that derives the current state
 -- from the newest one. A `state` column would be an UPDATE, and UPDATEs are how history gets
--- quietly rewritten (Law 2). The ledger refuses that for transactions; there is no argument
+-- quietly rewritten (append-only). The ledger refuses that for transactions; there is no argument
 -- for allowing it for the judgements made about them.
 
 -- ---------------------------------------------------------------------------
@@ -21,7 +21,7 @@
 -- a control character. The same difference found on Monday and again on Tuesday is one
 -- exception seen twice — without that, the queue grows by the number of runs rather than by
 -- the number of problems, and nobody reads it by Thursday. Derivation is also what lets a
--- replay reach the same keys as the run it replays (Law 5).
+-- replay reach the same keys as the run it replays (determinism).
 -- ---------------------------------------------------------------------------
 CREATE TABLE exception_events (
   event_id      BIGSERIAL PRIMARY KEY,

@@ -183,7 +183,7 @@ test('a contract does not price a currency it was not quoted in', () => {
 });
 
 /**
- * D-026, still standing. Nomba prices per merchant with no public card, so there is
+ * ADR-0026, still standing. Nomba prices per merchant with no public card, so there is
  * nothing honest to seed — and `null` makes the matcher fall back to matching on amount
  * and reporting the fee it observed, rather than generating a permanent stream of
  * variances against a rate nobody ever quoted.
