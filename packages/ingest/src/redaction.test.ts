@@ -42,13 +42,21 @@ function flutterwave(body: unknown) {
     source: 'flutterwave',
     rawBody,
     secret: SECRET,
-    headers: { 'verif-hash': SECRET },
+    // HMAC-SHA256 in base64 under `flutterwave-signature` — not Paystack's SHA-512 hex, and
+    // not the old `verif-hash` shared-secret header. Four providers, four schemes, which is
+    // exactly why verification lives in a connector and not in this layer's head.
+    headers: {
+      'flutterwave-signature': createHmac('sha256', SECRET).update(rawBody).digest('base64'),
+    },
   };
 }
 
 test('a redacted Paystack delivery still means exactly what the original meant', () => {
   for (const body of fixture('paystack-webhooks.json')) {
     const original = ingestWebhook(paystack(body));
+    // Asserted before the comparison, so a signature that stopped verifying could not make
+    // this test pass by having both sides agree that the delivery is unauthentic.
+    assert.equal(original.kind, 'payment');
     const reduced = ingestWebhook(paystack(JSON.parse(redact(Buffer.from(JSON.stringify(body), 'utf8')).bytes.toString('utf8'))));
 
     assert.deepEqual(reduced, original, `redaction changed the meaning of ${JSON.stringify(body).slice(0, 80)}`);
@@ -58,6 +66,7 @@ test('a redacted Paystack delivery still means exactly what the original meant',
 test('a redacted Flutterwave delivery still means exactly what the original meant', () => {
   for (const body of fixture('flutterwave-webhooks.json')) {
     const original = ingestWebhook(flutterwave(body));
+    assert.equal(original.kind, 'payment');
     const reduced = ingestWebhook(flutterwave(JSON.parse(redact(Buffer.from(JSON.stringify(body), 'utf8')).bytes.toString('utf8'))));
 
     assert.deepEqual(reduced, original);

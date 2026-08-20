@@ -27,7 +27,7 @@ than a receipt ([ADR-0050](../../docs/adr/0050-webhooks-accepted-durably.md),
 |---|---|---|
 | `GET` | `/health` | Database reachability and inbox depth. No authentication — a health check that needs a credential is one the load balancer cannot make. |
 | `POST` | `/webhooks/:source` | 200 accepted · 401 bad signature · 404 unknown source · 503 no secret configured |
-| `GET` | `/deliveries/:deliveryId` | What became of an accepted webhook, down to the ledger transaction id |
+| `GET` | `/deliveries/:deliveryId` | What became of an accepted webhook, down to the ledger transaction id, and which version of its payload is still held |
 | `GET` | `/balances` | Every account, its meaning, and its balance in kobo |
 | `POST` | `/ingest/settlement/:source` | Raw bytes · 501 for a source with no adapter |
 | `POST` | `/ingest/bank` | Raw bytes |

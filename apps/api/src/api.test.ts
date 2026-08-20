@@ -731,14 +731,22 @@ describe('the service', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run'
       assert.ok(!text.includes(gone), `${gone} survived the drain`);
     }
 
-    // And the delivery is still answerable, which is the promise the inbox makes.
+    // And the delivery is still answerable, which is the promise the inbox makes — including
+    // the answer to "do you still hold my details?", which is the question a subject-access
+    // request asks and which used to need database access to answer.
     const fate = await app.inject({
       method: 'GET',
       url: `/deliveries/${deliveryId}`,
       headers: authed(),
     });
     assert.equal(fate.statusCode, 200);
-    assert.equal((fate.json() as { state: string }).state, 'processed');
+    const reported = fate.json() as {
+      state: string;
+      held: { content: string; redactedAt: string | null };
+    };
+    assert.equal(reported.state, 'processed');
+    assert.equal(reported.held.content, 'redacted');
+    assert.equal(reported.held.redactedAt, NOW.toISOString());
   });
 
   /** Upload a statement and hand back the evidence id it produced. */

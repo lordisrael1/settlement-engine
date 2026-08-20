@@ -410,6 +410,19 @@ export interface DeliveryRecord {
   readonly transactionId: TransactionId | null;
   readonly receivedAt: Date;
   readonly processedAt: Date | null;
+  /**
+   * Which version of the payload is still here.
+   *
+   * Reported for the same reason `evidence` reports it: "do we still hold this person's
+   * details?" is a question with a deadline attached — an NDPA subject-access request — and
+   * an answer that requires somebody with database access is not an answer a service can
+   * give (ADR-0064). Never inferred from `state`: a delivery can be processed and not yet
+   * swept, and a system that guesses which bytes it is holding cannot answer the only
+   * question that matters about them.
+   */
+  readonly content: 'original' | 'redacted';
+  /** When the original was destroyed. Null while it is still here. */
+  readonly redactedAt: Date | null;
 }
 
 export async function deliveryAt(db: Executor, id: string): Promise<DeliveryRecord | null> {
@@ -423,9 +436,11 @@ export async function deliveryAt(db: Executor, id: string): Promise<DeliveryReco
     transaction_id: string | null;
     received_at: Date;
     processed_at: Date | null;
+    content: 'original' | 'redacted';
+    redacted_at: Date | null;
   }>(
     `SELECT delivery_id, source, state, attempts, detail, last_error, transaction_id,
-            received_at, processed_at
+            received_at, processed_at, content, redacted_at
        FROM webhook_inbox WHERE delivery_id = $1`,
     [id],
   );
@@ -442,6 +457,8 @@ export async function deliveryAt(db: Executor, id: string): Promise<DeliveryReco
         transactionId: row.transaction_id,
         receivedAt: row.received_at,
         processedAt: row.processed_at,
+        content: row.content,
+        redactedAt: row.redacted_at,
       }
     : null;
 }

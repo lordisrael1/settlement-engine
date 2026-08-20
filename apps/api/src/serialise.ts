@@ -141,5 +141,13 @@ export function asDelivery(delivery: DeliveryRecord): unknown {
     transactionId: delivery.transactionId,
     receivedAt: delivery.receivedAt,
     processedAt: delivery.processedAt,
+    // What is still held of the provider's payload, said the same way `GET /evidence/:id`
+    // says it. Without this the one question a data-protection request actually asks —
+    // "do you still have my details?" — was answerable only by somebody with database
+    // access, which is not a service answering it (ADR-0064).
+    held: {
+      content: delivery.content,
+      redactedAt: delivery.redactedAt?.toISOString() ?? null,
+    },
   };
 }
