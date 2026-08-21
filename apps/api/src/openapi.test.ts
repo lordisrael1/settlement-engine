@@ -105,21 +105,75 @@ test('every operation documents at least one failure', async () => {
 });
 
 /**
- * Three ways of being authentic, and the specification has to say so.
+ * The two things a caller can actually *hold* are security schemes. The third rail is not.
  *
- * A reference that describes only the API key would leave a provider integrator guessing at
- * the one rail that does not use one — and an operator assuming the export link needs a key
- * it deliberately does not (ADR-0052, ADR-0066).
+ * A webhook signature is computed per request from the body and a shared secret: there is no
+ * value to paste and none that works twice. Declaring it as an `apiKey` header — the usual
+ * workaround, since OpenAPI has no scheme for it — makes a renderer print "Auth Required"
+ * beside a "YOUR_SECRET_TOKEN" box, which teaches an integrator the precise thing ADR-0052
+ * exists to prevent: that a provider holds a credential of ours.
  */
-test('the specification describes all three authentication rails', async () => {
+test('only credentials a caller can hold are security schemes', async () => {
   const spec = await specification();
 
-  assert.deepEqual(Object.keys(spec.components.securitySchemes).sort(), [
-    'apiKey',
-    'exportToken',
-    'providerSignature',
-  ]);
+  assert.deepEqual(Object.keys(spec.components.securitySchemes).sort(), ['apiKey', 'exportToken']);
   assert.equal(spec.openapi, '3.1.0');
+});
+
+/**
+ * The webhook rail says it needs no credential, and says what it needs instead.
+ *
+ * Both halves matter. An empty `security` alone would read as "open"; the header parameters
+ * are what make it read as "authenticated by something you compute".
+ */
+test('the webhook operation declares no credential and documents the signature headers', async () => {
+  const spec = await specification();
+  const operation = spec.paths['/webhooks/{source}']?.['post'] as {
+    security?: unknown[];
+    parameters?: { name: string; in: string }[];
+  };
+
+  assert.ok(operation);
+  assert.deepEqual(operation.security, [], 'a provider holds no credential of ours');
+
+  const headers = (operation.parameters ?? [])
+    .filter((parameter) => parameter.in === 'header')
+    .map((parameter) => parameter.name)
+    .sort();
+
+  // Derived from the connectors, so this fails if a provider's header changes and the
+  // reference is left describing the old one.
+  assert.deepEqual(headers, [
+    'flutterwave-signature',
+    'monnify-signature',
+    'nomba-signature',
+    'nomba-timestamp',
+    'x-paystack-signature',
+  ]);
+});
+
+/**
+ * Every operation that takes a body says so.
+ *
+ * This exists because the same mistake shipped twice: `@fastify/swagger` builds a request
+ * body from `schema.body` and `schema.consumes` and ignores a hand-written `requestBody`, so
+ * writing the OpenAPI shape directly produced operations documented as taking nothing at all.
+ * The three rails that swallow a whole file are exactly the ones where a missing body is
+ * least likely to be noticed by reading and most likely to waste somebody's afternoon.
+ */
+test('every operation that takes a body documents one', async () => {
+  const spec = await specification();
+
+  const takesABody = ['/webhooks/{source}', '/ingest/settlement/{source}', '/ingest/bank'];
+  const missing: string[] = [];
+
+  for (const path of takesABody) {
+    const operation = spec.paths[path]?.['post'] as { requestBody?: { content?: object } };
+    const media = Object.keys(operation?.requestBody?.content ?? {});
+    if (media.length === 0) missing.push(path);
+  }
+
+  assert.deepEqual(missing, [], 'these swallow a file and are documented as taking nothing');
 });
 
 /**

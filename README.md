@@ -155,10 +155,10 @@ Configuration arrives as environment variables; see [.env.example](.env.example)
 
     npm install
     npm run build
-    npm test                    # 113 tests; suites needing a database skip themselves
+    npm test                    # 115 tests; suites needing a database skip themselves
 
     docker compose up -d postgres
-    DATABASE_URL=postgres://recon:recon@localhost:5432/recon npm test    # 224 tests
+    DATABASE_URL=postgres://recon:recon@localhost:5432/recon npm test    # 226 tests
 
 The database suites need a real Postgres, because the invariants they assert are enforced by
 Postgres. Each suite takes its own schema, so they can run concurrently.

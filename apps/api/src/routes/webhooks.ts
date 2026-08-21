@@ -64,7 +64,12 @@ export const webhookRoutes: FastifyPluginCallback<Services> = (app, services, do
           'delivery down. It does not normalise the payload, post to the ledger, match ' +
           'anything or send a notification — a worker does all of that later, from the row ' +
           'this wrote (ADR-0050).',
-        security: [{ providerSignature: [] }],
+        // No security scheme, and that is the accurate statement rather than an omission.
+        // This rail is authenticated by a signature computed over the body, which is not a
+        // credential a caller holds — see the header documentation in `openapi.ts`. Declaring
+        // one here would make a reference renderer show "Auth Required" and offer a box to
+        // paste a token into, which is the misunderstanding ADR-0052 exists to prevent.
+        security: [],
       },
     },
     async (request, reply) => {

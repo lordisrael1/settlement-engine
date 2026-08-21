@@ -66,6 +66,7 @@ export {
   sourceProfile,
   publishedContracts,
   UnknownSourceError,
+  type SignatureHeader,
   type SourceProfile,
 } from './sources.js';
 

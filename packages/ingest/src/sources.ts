@@ -1,8 +1,15 @@
 import type { Connector } from '@pay-normalize/core';
-import { flutterwave } from '@pay-normalize/flutterwave';
-import { monnify } from '@pay-normalize/monnify';
-import { nomba } from '@pay-normalize/nomba';
-import { paystack } from '@pay-normalize/paystack';
+import {
+  SIGNATURE_HEADER as FLUTTERWAVE_SIGNATURE,
+  flutterwave,
+} from '@pay-normalize/flutterwave';
+import { SIGNATURE_HEADER as MONNIFY_SIGNATURE, monnify } from '@pay-normalize/monnify';
+import {
+  SIGNATURE_HEADER as NOMBA_SIGNATURE,
+  TIMESTAMP_HEADER as NOMBA_TIMESTAMP,
+  nomba,
+} from '@pay-normalize/nomba';
+import { SIGNATURE_HEADER as PAYSTACK_SIGNATURE, paystack } from '@pay-normalize/paystack';
 
 import type { BusinessCalendar, FeeContract, MerchantId, SourceId } from '@recon/canon';
 
@@ -57,6 +64,31 @@ export interface SourceProfile {
    * matched on amount and date instead, at lower confidence — never by a parser deciding.
    */
   readonly narrationMarkers: readonly string[];
+  /**
+   * The headers this source's signature travels in.
+   *
+   * Taken from the connector's own exported constants rather than written down again here,
+   * because a header name copied by hand is a header name that will eventually disagree with
+   * the code that reads it — and the disagreement would surface as "the provider's webhooks
+   * stopped verifying", which is the most expensive way to learn about a typo.
+   *
+   * Data on the profile rather than a fact the service knows, so that the API reference can
+   * describe the rail accurately without the transport layer learning any provider's scheme.
+   * The schemes themselves differ — different algorithms, different digests, and Nomba signs
+   * a set of reconstructed fields rather than the raw body — and all of that stays inside the
+   * connector, which is why `verifyWebhook` takes a source and not a scheme.
+   *
+   * Each header says what it *carries*, because they are not interchangeable: a signature is
+   * derived from the payload and the shared secret, while Nomba's timestamp is an input to
+   * that derivation. Describing the second as though it were the first would be a small,
+   * confident lie in the one document an integrator reads before writing any code.
+   */
+  readonly signatureHeaders: readonly SignatureHeader[];
+}
+
+export interface SignatureHeader {
+  readonly name: string;
+  readonly carries: 'signature' | 'timestamp';
 }
 
 /**
@@ -91,6 +123,7 @@ const PROFILES: readonly SourceProfile[] = [
   {
     id: paystack.provider,
     connector: paystack,
+    signatureHeaders: [{ name: PAYSTACK_SIGNATURE, carries: 'signature' }],
     // Paystack's connector refuses to parse settlement exports until a sanitized real
     // file pins the column layout. Inventing one here would produce a parser that looks
     // right and is wrong, which is worse than not having one — so this stays null until
@@ -102,6 +135,7 @@ const PROFILES: readonly SourceProfile[] = [
   {
     id: flutterwave.provider,
     connector: flutterwave,
+    signatureHeaders: [{ name: FLUTTERWAVE_SIGNATURE, carries: 'signature' }],
     settlement: flutterwaveSettlements,
     calendar: T_PLUS_2,
     narrationMarkers: ['FLUTTERWAVE', 'FLW', 'RAVE'],
@@ -109,6 +143,12 @@ const PROFILES: readonly SourceProfile[] = [
   {
     id: nomba.provider,
     connector: nomba,
+    signatureHeaders: [
+      { name: NOMBA_SIGNATURE, carries: 'signature' },
+      // Nomba's scheme signs a set of reconstructed fields together with this timestamp,
+      // rather than the raw body. The timestamp is an input to the signature, not one.
+      { name: NOMBA_TIMESTAMP, carries: 'timestamp' },
+    ],
     settlement: nombaSettlements,
     calendar: T_PLUS_1,
     narrationMarkers: ['NOMBA'],
@@ -116,6 +156,7 @@ const PROFILES: readonly SourceProfile[] = [
   {
     id: monnify.provider,
     connector: monnify,
+    signatureHeaders: [{ name: MONNIFY_SIGNATURE, carries: 'signature' }],
     settlement: monnifySettlements,
     calendar: SAME_DAY,
     narrationMarkers: ['MONNIFY', 'MFY'],

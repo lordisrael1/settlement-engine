@@ -1,5 +1,7 @@
 import type { FastifySchema } from 'fastify';
 
+import { SOURCES } from '@recon/ingest';
+
 /**
  * The API description, and one decision about how it is produced.
  *
@@ -68,16 +70,6 @@ export const OPENAPI_DOCUMENT = {
           'exist beyond ordinary access: `evidence.raw` and `evidence.export`. A reconciliation ' +
           'operator who works the queue all day has no reason to hold either, and an audit log ' +
           'where everybody could have done everything narrows nothing down (ADR-0066).',
-      },
-      providerSignature: {
-        type: 'apiKey',
-        in: 'header',
-        name: 'x-paystack-signature',
-        description:
-          'Not a credential this service issues. Each provider signs the raw request bytes with a ' +
-          'shared secret using its own scheme and its own header — HMAC-SHA512 hex here, ' +
-          'HMAC-SHA256 base64 there — and that knowledge lives inside the connector. The header ' +
-          'named here is one example; the actual header varies by source.',
       },
       exportToken: {
         type: 'apiKey',
@@ -213,9 +205,60 @@ const problem = (description: string) =>
  * six months later (ADR-0033).
  */
 const BINARY_BODY = {
-  required: true,
-  content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } } },
+  consumes: ['application/octet-stream'],
+  body: {
+    type: 'string',
+    format: 'binary',
+    description:
+    'The export file itself, as bytes — `curl --data-binary @settlements.json`, not a JSON ' +
+    'array of records.\n\n' +
+    'Note what this rail is **not**: the service never calls a provider’s API. There is no ' +
+    'HTTP client anywhere in it. Something outside — a person exporting from a dashboard, or ' +
+    'a cron job that fetches and pipes the response here — obtains the file, and this sees ' +
+      'only bytes. That keeps `evidenceId` the hash of the provider’s own artifact rather than ' +
+      'of our rendering of it (ADR-0033), and keeps ingest free of a network (ADR-0020).',
+  },
 } as const;
+
+/**
+ * The headers each provider's signature arrives in, read from the source profiles.
+ *
+ * Descriptions say what the value *is* — computed, per request, unpasteable — because the
+ * failure this is guarding against is not a missing header but a reader who believes the
+ * value is a token they were issued.
+ */
+function signatureHeaders(): Record<string, unknown> {
+  const properties: Record<string, unknown> = {};
+
+  for (const profile of SOURCES.values()) {
+    const secret = `\`RECON_WEBHOOK_SECRET_${profile.id.toUpperCase()}\``;
+
+    for (const header of profile.signatureHeaders) {
+      properties[header.name] = {
+        type: 'string',
+        description:
+          header.carries === 'signature'
+            ? `Sent by **${profile.id}**. Derived per request from the payload and the shared ` +
+              `secret in ${secret} — not a credential this service issues, nothing to paste, ` +
+              `and a different value for every delivery. The algorithm and digest differ by ` +
+              `provider and live inside that provider's connector.`
+            : `Sent by **${profile.id}**, and an *input* to its signature rather than a ` +
+              `signature itself: this provider signs a set of reconstructed fields together ` +
+              `with this timestamp instead of signing the raw body.`,
+      };
+    }
+  }
+
+  return {
+    type: 'object',
+    description:
+      'Exactly one provider’s headers apply, decided by `:source`. A delivery is authentic if ' +
+      'its signature verifies and for no other reason: there is no API key on this rail, ' +
+      'because issuing one would mean sending every provider a credential that reads your ' +
+      'books (ADR-0052).',
+    properties,
+  };
+}
 
 /**
  * What each operation returns, keyed by `METHOD /url` as Fastify knows it.
@@ -243,14 +286,37 @@ export const OPERATIONS: Readonly<Record<string, Partial<FastifySchema> & Record
   },
 
   'POST /webhooks/:source': {
-    requestBody: {
-      required: true,
+    /**
+     * Documented as headers rather than as a security scheme, and the distinction is the one
+     * this rail exists to make.
+     *
+     * OpenAPI's security schemes describe *credentials you hold and present* — an API key, a
+     * bearer token, a password. A webhook signature is none of those. It is a value **computed
+     * per request** from the body and a shared secret, so there is nothing to paste, nothing
+     * to store in a client, and no fixed string that would work twice. Modelling it as an
+     * `apiKey` header — the usual workaround — makes a reference renderer print "Auth
+     * Required" beside a "YOUR_SECRET_TOKEN" placeholder, which describes the exact mistake
+     * the two-rail design (ADR-0052) exists to prevent: it invites an integrator to think a
+     * provider holds a credential of ours.
+     *
+     * The header names are derived from the connectors, never retyped, so this cannot drift
+     * away from the code that reads them.
+     */
+    headers: signatureHeaders(),
+    // `consumes` + `body`, not a hand-built `requestBody`: the generator reads the former and
+    // ignores the latter, so writing the OpenAPI shape directly produces an operation with no
+    // request body at all — documented, and invisible.
+    consumes: ['application/json'],
+    body: {
+      type: 'string',
+      format: 'binary',
       description:
         'The provider’s **raw bytes**, exactly as sent. Signatures are computed over bytes, ' +
         'and `JSON.parse` followed by re-serialising produces different ones — reordered keys, ' +
         'different whitespace, different unicode escaping — so a JSON body parser anywhere ' +
-        'upstream rejects perfectly valid payloads.',
-      content: { 'application/json': { schema: { type: 'string', format: 'binary' } } },
+        'upstream rejects perfectly valid payloads.\n\n' +
+        'Nothing calls this endpoint by hand. The provider posts to it from its own servers, ' +
+        'at a URL you registered in its dashboard, after a customer pays.',
     },
     response: {
       200: json(
@@ -286,7 +352,7 @@ export const OPERATIONS: Readonly<Record<string, Partial<FastifySchema> & Record
   },
 
   'POST /ingest/settlement/:source': {
-    requestBody: BINARY_BODY,
+    ...BINARY_BODY,
     response: {
       201: json('Stored. Books nothing — a PSP report is a claim by a party with an interest in the answer (ADR-0027).', {
         type: 'object',
@@ -324,7 +390,7 @@ export const OPERATIONS: Readonly<Record<string, Partial<FastifySchema> & Record
   },
 
   'POST /ingest/bank': {
-    requestBody: BINARY_BODY,
+    ...BINARY_BODY,
     response: {
       201: json('Stored. This is the only evidence that can book cash — run `POST /reconcile/runs` next.', {
         type: 'object',
