@@ -1,0 +1,105 @@
+# The claims in this repository, checked on every push.
+#
+# This project's whole argument is that the books are provable: invariants enforced by
+# database triggers, a ledger that replays to the same balances, a matcher that refuses to
+# guess. An argument like that is worth exactly as much as the evidence that it still holds
+# this morning, which is why this file exists and why it runs the *whole* suite.
+#
+# The Postgres service below is the point, not a detail. Without `DATABASE_URL` the suite
+# silently shrinks from 226 tests to 115 — the trigger-enforced invariants, the replay
+# determinism check, the exception queue's lifecycle, the durable inbox and every API route
+# are all `skip`ped, because none of them can be honestly tested against a fake. A green
+# run with no database would report success while never touching the half of the system
+# that makes the claims.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # So a red main can be re-checked without an empty commit.
+  workflow_dispatch:
+
+# A second push supersedes the first. Reconciliation runs are slow enough to be worth not
+# queueing behind an answer nobody is waiting for any more.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      # One version failing must not cancel the other's run: knowing whether a break is
+      # version-specific is most of the diagnosis.
+      fail-fast: false
+      matrix:
+        # 22 is Active LTS and the floor this repository can actually run on — the test
+        # script passes glob patterns to `node --test`, which Node 20 does not expand and
+        # instead exits with "Could not find". 24 is Current, here to catch a deprecation
+        # before it becomes an upgrade emergency.
+        node: ['22', '24']
+
+    services:
+      postgres:
+        # Pinned to the same major the deployment runs (see docker-compose.yml). Testing
+        # against a different Postgres than production would leave the trigger behaviour
+        # this system leans on unverified where it matters.
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: recon
+          POSTGRES_PASSWORD: recon
+          POSTGRES_DB: recon
+        ports:
+          - 5432:5432
+        # A running container and a database accepting connections are not the same event.
+        # Without this the first suite races the server's startup and fails on a good build.
+        options: >-
+          --health-cmd "pg_isready -U recon -d recon"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `ci` rather than `install`: it installs the lockfile exactly and fails if
+      # package.json and the lock disagree, so a dependency cannot drift in unnoticed
+      # through a build that quietly resolved something newer.
+      - name: Install
+        run: npm ci
+
+      # The build is also the typecheck. `tsc --build` across the project references is what
+      # proves the packages still agree with each other, and it runs before the tests
+      # because a type error is a faster and clearer failure than whatever it causes at
+      # runtime three suites later.
+      - name: Build and typecheck
+        run: npm run build
+
+      - name: Test
+        env:
+          # The line that doubles the suite. Every DB-backed test provisions a schema of its
+          # own inside this database and migrates it, so parallel jobs on one server do not
+          # collide and no test sees another's rows.
+          DATABASE_URL: postgres://recon:recon@localhost:5432/recon
+        run: npm test
+
+  image:
+    name: image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Dockerfile is the deployment. A repository whose tests pass and whose image
+      # stopped building is broken in the only way that reaches production, and it is the
+      # kind of break that hides for weeks because nobody builds the image locally.
+      - name: Build image
+        run: docker build -t recon-api:ci .

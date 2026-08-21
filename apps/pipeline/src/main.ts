@@ -25,6 +25,7 @@ import {
   RECONCILER_MIGRATIONS_DIR,
 } from '@recon/reconciler';
 
+import { BENCHMARKS, runBenchmarks, type Benchmark } from './bench.js';
 import { runDemo } from './demo.js';
 import { runRetentionCommand } from './retention.js';
 import { runSimulation } from './simulate.js';
@@ -76,6 +77,7 @@ const COMMANDS = [
   'exceptions',
   'replay',
   'evidence-retention',
+  'bench',
 ] as const;
 type Command = (typeof COMMANDS)[number];
 
@@ -84,6 +86,35 @@ async function main(argv: readonly string[]): Promise<number> {
   if (!COMMANDS.includes(command)) {
     console.error(`Unknown command "${command}". Try one of: ${COMMANDS.join(', ')}`);
     return 2;
+  }
+
+  // Dispatched before the pool exists, deliberately. Two of the three benchmarks touch no
+  // database — parsing and the subset-sum search are pure functions — and demanding a
+  // Postgres to measure them would make the cheapest numbers in the repository the most
+  // annoying ones to reproduce. The ledger benchmark asks for the URL itself and says so
+  // when it is missing, rather than being skipped in silence.
+  if (command === 'bench') {
+    const flag = (name: string, fallback: number): number => {
+      const found = argv.find((arg) => arg.startsWith(`--${name}=`));
+      const value = found ? Number(found.slice(name.length + 3)) : NaN;
+      return Number.isFinite(value) && value > 0 ? value : fallback;
+    };
+
+    const named = argv.slice(1).filter((arg) => !arg.startsWith('-')) as Benchmark[];
+    const unknown = named.filter((name) => !BENCHMARKS.includes(name));
+    if (unknown.length > 0) {
+      console.error(`Unknown benchmark "${unknown[0]}". Try one of: ${BENCHMARKS.join(', ')}`);
+      return 2;
+    }
+
+    heading('Benchmark');
+    await runBenchmarks(named.length > 0 ? named : BENCHMARKS, {
+      seed: flag('seed', 1),
+      samples: flag('samples', 200),
+      line,
+      databaseUrl: process.env['DATABASE_URL'],
+    });
+    return 0;
   }
 
   const pool = createPool();

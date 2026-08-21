@@ -1,5 +1,7 @@
 # Reconciliation Engine
 
+[![CI](https://github.com/lordisrael1/settlement-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/lordisrael1/settlement-engine/actions/workflows/ci.yml)
+
 A payment reconciliation engine for Nigerian fintech, built on
 [`pay-normalize`](https://www.npmjs.com/org/pay-normalize).
 
@@ -163,6 +165,14 @@ Configuration arrives as environment variables; see [.env.example](.env.example)
 The database suites need a real Postgres, because the invariants they assert are enforced by
 Postgres. Each suite takes its own schema, so they can run concurrently.
 
+CI runs the second command, not the first. A green build with no database would report
+success while skipping every trigger-enforced invariant, the replay determinism check, the
+exception lifecycle, the durable inbox and all of the HTTP routes — see
+[.github/workflows/ci.yml](.github/workflows/ci.yml). Node 22 is the floor: the test script
+passes glob patterns to `node --test`, which Node 20 does not expand.
+
+    npm run bench               # measure; see docs/PERFORMANCE.md
+
 Notable coverage: a test that feeds a synthetic PAN through the ingest boundary and asserts
 nothing is written; a test that redacts every provider fixture and asserts the canonical
 payment is unchanged, so the keep-list stays complete as connectors change; a property test
@@ -238,5 +248,6 @@ stores ([ADR-0049](docs/adr/0049-the-product-database-is-not-a-record.md)).
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Module layout, the dependency graph, request flow, where each invariant is enforced, and how it is deployed |
 | [docs/DOMAIN-MODEL.md](docs/DOMAIN-MODEL.md) | The chart of accounts, the payment lifecycle, matching stages and reason codes, and the exception lifecycle |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Measured throughput for parsing, ledger writes and batch matching — including where subset-sum stops finding answers |
 | [docs/adr/](docs/adr/README.md) | 62 decision records, each with its context, decision and consequences |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Engineering rules for changing this codebase |

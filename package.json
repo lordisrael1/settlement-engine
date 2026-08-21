@@ -10,12 +10,13 @@
   "scripts": {
     "build": "tsc --build",
     "clean": "tsc --build --clean",
+    "bench": "npm run build && node apps/pipeline/dist/main.js bench",
     "test": "npm run build && node --test \"packages/*/dist/**/*.test.js\" \"apps/*/dist/**/*.test.js\""
   },
   "devDependencies": {
     "typescript": "^5.6.3"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }
