@@ -17,11 +17,12 @@ import {
   money,
   reasonKind,
   severityOf,
+  subtract,
 } from '@recon/canon';
 import type { EntryInput, Executor } from '@recon/ledger-core';
 import { appendEvent, inTransaction } from '@recon/ledger-core';
 
-import { recordResolution } from './store.js';
+import { recordResolution, type BankLineCollision } from './store.js';
 
 /**
  * The queue — and the machinery that keeps it honest between runs.
@@ -35,11 +36,15 @@ import { recordResolution } from './store.js';
  *
  *   `raiseExceptions`  record what this run found, once per distinct problem
  *   `acknowledge` / `resolveByHuman`   a person takes it, and later answers it
- *   `clearVanished`    the run no longer finds it, so it is over
+ *   `clearVanished`    the run looked for it, did not find it, and nobody owns it
  *
  * Without `clearVanished` the queue only grows, and a queue that only grows is one people
  * stop opening. With it, a T+1 straggler sits as pending and clears itself when its file
  * lands, with nobody alerted.
+ *
+ * Read the third one's restrictions before trusting it, because the same mechanism that
+ * keeps the queue from growing is the one that could silently empty it: it clears only
+ * subjects the run actually loaded, and never an exception a human has acknowledged.
  */
 
 const kobo = (amount: Money): string => amount.kobo.toString();
@@ -130,6 +135,49 @@ function subjectOf(
   }
 }
 
+/**
+ * A statement row that could not be stored because a different row already holds its id.
+ *
+ * This is the one queue entry the *matcher* never produces, and it has to exist for exactly
+ * that reason: the collision happens at ingest, before any matching, and the row it concerns
+ * never reaches the matcher at all. A run cannot report a credit it was never given, which
+ * is what made this the quietest way for money to leave the books — the symptom arrived days
+ * later and somewhere else, as a payout that would not confirm (ADR-0068).
+ *
+ * The subject is the contested id rather than either row, because that is what a person has
+ * to decide about: two credits, one identity, and which of them the books currently hold.
+ * `considered` carries the stored row and what differs, so the queue entry answers "which
+ * two?" without a query.
+ */
+export function collisionDraft(collision: BankLineCollision): ExceptionDraft {
+  return {
+    subject: 'bank_credit',
+    subjectId: collision.idempotencyKey,
+    reason: 'BANK_LINE_COLLISION',
+    amount: collision.arriving.amount,
+    dueAt: null,
+    // The file the *arriving* row came from. The stored row's evidence is in `considered`;
+    // this is the one somebody is about to be told was ingested successfully.
+    evidenceId: collision.arriving.evidenceId,
+    links: {
+      transactionIds: [],
+      payoutReferences: [],
+      bankCreditKeys: [collision.idempotencyKey],
+      settlementKeys: [],
+    },
+    considered: [
+      {
+        candidateId: collision.stored.evidenceId,
+        kind: 'bank_credit',
+        difference: subtract(collision.arriving.amount, money(BigInt(collision.stored.amountKobo))),
+        // The stored row got there first and holds the id. That is the whole of the
+        // conflict, and it is exactly what `already_claimed` means everywhere else.
+        rejectedBecause: 'already_claimed',
+      },
+    ],
+  };
+}
+
 export interface RaiseOutcome {
   readonly raised: number;
   /** Already open, and left exactly as it was. */
@@ -197,30 +245,91 @@ export async function raiseExceptions(
 }
 
 /**
- * Close every open exception this run did not find again.
+ * What one run was actually in a position to judge about one kind of subject.
+ *
+ * The distinction this carries is the difference between "the problem went away" and "we
+ * did not look", and until it existed the two were the same code path. Every loader in a
+ * run is bounded by a `limit`; past that bound the run holds a *sample*, and a subject
+ * outside the sample is absent from the findings for a reason that has nothing to do with
+ * whether it is still wrong.
+ */
+export interface SubjectWindow {
+  /** The subject ids this run actually loaded and re-judged. */
+  readonly witnessed: ReadonlySet<string>;
+  /**
+   * Whether the loaders hit their bound.
+   *
+   * `false` means the run read the entire population of this kind, so absence from the
+   * findings really does mean the conclusion is no longer reachable — the record was
+   * claimed, matched or resolved — and clearing is safe for subjects outside `witnessed`
+   * too. That case matters: a bank credit that finally confirmed a payout is no longer an
+   * unmatched line, so it is not in `witnessed`, and its old `UNIDENTIFIED_CREDIT` must
+   * still clear. `true` means the opposite, and clearing is confined to what was loaded.
+   */
+  readonly truncated: boolean;
+}
+
+/** Which subjects this run may speak to, and how far it could see for each. */
+export type ClearScope = Partial<Record<ExceptionSubject, SubjectWindow>>;
+
+export interface ClearOutcome {
+  /** Closed with `evidence_arrived`: the run looked, and the conclusion was gone. */
+  readonly cleared: number;
+  /**
+   * Left open although this run did not find them again.
+   *
+   * Worth reporting rather than swallowing. A figure that stays non-zero run after run is
+   * the visible symptom of a queue whose subjects no longer fit inside the run's bound —
+   * the queue has stopped being self-clearing, and the fix is a bigger `limit` or a
+   * narrower run, not patience.
+   */
+  readonly withheld: number;
+}
+
+/**
+ * Close every **open** exception this run looked for and did not find again.
  *
  * This is the auto-clearing the whole phase exists for. A T+1 straggler is raised on
  * Tuesday, the settlement file lands on Wednesday, and on Wednesday's run the matcher
  * simply no longer reaches that conclusion — so the exception is resolved with
  * `evidence_arrived`, and nobody is woken for either event.
  *
- * Scoped by subject kind rather than closing everything absent from the findings, because a
- * run that only ingested a bank statement has nothing to say about payout-side exceptions,
- * and treating silence as "resolved" would close problems that are still entirely real.
+ * Two restrictions keep it from being the mechanism that silently empties the queue rather
+ * than the one that keeps it honest. Both are load-bearing, and both were real losses.
+ *
+ *   **It clears only what the run could see.** Every loader in `reconcile` stops at
+ *   `limit` rows. Past that bound the matcher never considers the remaining records, so it
+ *   reaches no conclusion about them, so they are absent from `found` — and absence used to
+ *   mean resolved. One busy day past the limit and every exception beyond the cutoff was
+ *   closed with `evidence_arrived`, on the strength of evidence nobody read. So the caller
+ *   states what it loaded, and anything outside that window is left exactly as it is.
+ *
+ *   **It never takes an item away from a person.** Only `open` exceptions are cleared.
+ *   An `acknowledged` one belongs to a named human who is investigating it, and a run
+ *   deciding on their behalf that the matter is closed — labelled as though evidence had
+ *   arrived — is the machine overruling the person it exists to serve. If the problem
+ *   really is gone, they close it, and the queue records who did.
+ *
+ * Scoped by subject kind as well, because a run that only ingested a bank statement has
+ * nothing to say about payout-side exceptions, and treating silence as "resolved" would
+ * close problems that are still entirely real.
  */
 export async function clearVanished(
   db: Executor,
   found: readonly ExceptionDraft[],
-  scope: readonly ExceptionSubject[],
+  scope: ClearScope,
   at: Date,
-): Promise<number> {
-  if (scope.length === 0) return 0;
+): Promise<ClearOutcome> {
+  const subjects = Object.keys(scope) as ExceptionSubject[];
+  if (subjects.length === 0) return { cleared: 0, withheld: 0 };
 
   const stillFound = new Set(
     found.map((draft) => exceptionKey(draft.subject, draft.subjectId, draft.reason)),
   );
 
   let cleared = 0;
+  let withheld = 0;
+
   await inTransaction(db, async (client) => {
     const open = await client.query<{
       exception_key: string;
@@ -229,15 +338,33 @@ export async function clearVanished(
       reason: ReasonCode;
       state: ExceptionState;
     }>(
+      // Acknowledged items are read and then refused below rather than filtered out here,
+      // so that one is *counted* as withheld. "This run did not find an exception a person
+      // is holding" is a fact worth reporting: it usually means the problem has gone away
+      // and they can close it, and it is invisible if the query never returns the row.
       `SELECT exception_key, subject, subject_id, reason, state
          FROM exceptions
         WHERE state <> 'resolved' AND subject = ANY($1)
         ORDER BY exception_key`,
-      [scope],
+      [subjects],
     );
 
     for (const row of open.rows) {
       if (stillFound.has(row.exception_key)) continue;
+
+      // Somebody's open tab. The run does not get to close it on their behalf, however
+      // certain it is that the difference has gone.
+      if (row.state !== 'open') {
+        withheld += 1;
+        continue;
+      }
+
+      const window = scope[row.subject];
+      // Outside the run's window: it was never re-judged, so its silence says nothing.
+      if (!window || (window.truncated && !window.witnessed.has(row.subject_id))) {
+        withheld += 1;
+        continue;
+      }
 
       const appended = await client.query<{ event_id: string }>(
         `INSERT INTO exception_events
@@ -258,7 +385,7 @@ export async function clearVanished(
     }
   });
 
-  return cleared;
+  return { cleared, withheld };
 }
 
 /**

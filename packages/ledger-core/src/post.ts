@@ -127,9 +127,28 @@ export async function postTransaction(
       [input.transactionId, input.initialState, input.recordedAt],
     );
 
-    // One row per account: a transaction may touch the same account twice, and two
-    // conflicting upserts of the same key in one statement is an error in Postgres.
-    for (const [accountId, amount] of totalPerAccount(input.entries)) {
+    // One row per account, **in a fixed order**, and both halves matter.
+    //
+    // One row because a transaction may touch the same account twice, and two conflicting
+    // upserts of the same key in one statement is an error in Postgres.
+    //
+    // A fixed order because each upsert takes a row lock, and two concurrent transactions
+    // that take the same locks in different orders deadlock. That was reachable here without
+    // any exotic concurrency: a settlement confirmation touches `bank_account`,
+    // `fees_expense`, `taxes_withheld`, `psp_reserve` and `psp_receivable` in *deduction*
+    // order, which is the order the PSP itemised them in — so two confirmations from two
+    // files could genuinely disagree about which account to lock first. Postgres would
+    // resolve it by killing one, the drain would count that as a failed attempt, and with a
+    // short retry interval the delivery could burn its whole budget on a collision that a
+    // sort prevents entirely.
+    //
+    // Sorting by account id imposes a total order every writer in the system shares, which
+    // is the standard and complete answer to lock-ordering deadlocks. It does nothing for
+    // the *contention* on `psp_receivable` — every booking for a merchant queues on that one
+    // row, and no index fixes that; see ADR-0053 and PERFORMANCE.md for what does.
+    for (const [accountId, amount] of [...totalPerAccount(input.entries)].sort(([a], [b]) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    )) {
       await client.query(
         `INSERT INTO account_balances (account_id, balance_kobo, currency)
               VALUES ($1, $2::bigint, $3)

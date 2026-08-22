@@ -233,6 +233,68 @@ export async function bookBankConfirmedSettlement(
   });
 }
 
+/**
+ * A reserve came back.
+ *
+ *   bank_account  +credited
+ *   psp_reserve   −credited
+ *
+ * The one bank credit that discharges no receivable, which is why it cannot go through
+ * `bookBankConfirmedSettlement`: that function refuses an empty `discharged` list, correctly,
+ * because money with nothing to discharge is a `PHANTOM_CREDIT` and not a settlement. A
+ * release is neither. Nothing new is earned and nothing is settled — an asset we already held
+ * changes which account it sits in, because the PSP finally sent it (ADR-0071).
+ *
+ * `returned` arrives as the deductions the inflow carried, which for a release are negative:
+ * the PSP itemised `reserve_release: −₦100,000` and `adjustmentEntries` turned that into
+ * `psp_reserve: −₦100,000`. Requiring them to cancel the credit exactly is the same refusal
+ * `bookBankConfirmedSettlement` makes and for the same reason — a booking that needs a plug
+ * to balance is a booking whose story we do not know.
+ *
+ * It still takes bank evidence. A PSP saying a reserve was released is a claim about its own
+ * future behaviour, exactly like any other payout report, and the rule that only a bank
+ * statement moves `bank_account` does not bend for money that was always ours.
+ */
+export async function bookReserveRelease(
+  db: Executor,
+  confirmation: BankConfirmation,
+  returned: readonly EntryInput[],
+): Promise<PostTransactionResult> {
+  if (isNegative(confirmation.credited) || isZero(confirmation.credited)) {
+    throw new ImplausibleSettlementError(
+      `Refusing to book reserve release "${confirmation.creditKey}" of ` +
+        `${format(confirmation.credited)}. A release of nothing is not an event, and a ` +
+        `negative one is a debit — which is a withholding, and books the other way.`,
+    );
+  }
+
+  const unexplained = add(confirmation.credited, sum(returned.map((entry) => entry.amount)));
+  if (!isZero(unexplained)) {
+    throw new ImplausibleSettlementError(
+      `Refusing to book reserve release "${confirmation.creditKey}": ` +
+        `${format(confirmation.credited)} of cash against ` +
+        `${format(sum(returned.map((entry) => entry.amount)))} of named returns leaves ` +
+        `${format(unexplained)} unaccounted for. A release that does not empty the accounts ` +
+        `it claims to be releasing is a payout carrying something else as well, and it needs ` +
+        `a person rather than a plug entry.`,
+    );
+  }
+
+  return postTransaction(db, {
+    transactionId: confirmation.creditKey,
+    source: confirmation.source,
+    reference: confirmation.reference,
+    occurredAt: confirmation.valueDate,
+    recordedAt: confirmation.recordedAt,
+    initialState: 'settled',
+    event: { type: 'ReserveReleased', causedBy: confirmation.reference },
+    entries: nonZero([
+      { accountId: 'bank_account', amount: confirmation.credited },
+      ...returned,
+    ]),
+  });
+}
+
 /** The identity of any non-settlement event the reconciler books. */
 export interface BookingEvent {
   readonly key: IdempotencyKey;
@@ -258,12 +320,39 @@ export interface BookingEvent {
  *
  * No bank evidence is required, and none is possible: nothing was ever credited, so there
  * is nothing for a statement to confirm.
+ *
+ * **Partial refunds book here too, and only the lifecycle differs.** `promise.amount` is
+ * how much came back and `promise.receivable` is what the promise opened at; when they
+ * differ, the entries are for the refunded part and the transaction stays `authorized`,
+ * because the PSP still owes us the rest and a payout is still coming for it. Transitioning
+ * to `reversed` on a ₦3,000 refund against a ₦10,000 charge would close a promise that is
+ * ₦7,000 alive — and the ₦7,000 would resurface later as a settlement nobody could match
+ * to anything (ADR-0069). The same test `bookBankConfirmedSettlement` already applies to a
+ * part-settled promise, applied to the other direction.
  */
 export async function bookReversal(
   db: Executor,
   event: BookingEvent,
   promise: DischargedPromise,
 ): Promise<PostTransactionResult> {
+  if (isNegative(promise.amount) || isZero(promise.amount)) {
+    throw new ImplausibleSettlementError(
+      `Refusing to book reversal "${event.key}" of ${format(promise.amount)}. A refund of ` +
+        `nothing, or of a negative amount, is a parsing error wearing a plausible face.`,
+    );
+  }
+
+  const excess = subtract(promise.amount, promise.receivable);
+  if (!isNegative(excess) && !isZero(excess)) {
+    throw new ImplausibleSettlementError(
+      `Refusing to book reversal "${event.key}" of ${format(promise.amount)} against a ` +
+        `receivable of ${format(promise.receivable)}: ${format(excess)} more would be given ` +
+        `back than was ever promised. Refunding more than was charged is a real event, and ` +
+        `it is a goodwill payment rather than a reversal — it does not belong against this ` +
+        `receivable.`,
+    );
+  }
+
   return inTransaction(db, async (client) => {
     const result = await postTransaction(client, {
       transactionId: event.key,
@@ -279,7 +368,9 @@ export async function bookReversal(
       ],
     });
 
-    if (result.outcome === 'posted') {
+    // Only a whole refund ends the promise's story. A partial one leaves it `authorized`,
+    // waiting for the payout that carries the remainder.
+    if (result.outcome === 'posted' && isZero(subtract(promise.receivable, promise.amount))) {
       await transition(client, {
         transactionId: promise.transactionId,
         to: 'reversed',

@@ -67,6 +67,23 @@ export type AnomalyKind =
    */
   | 'unknown_shape'
   /**
+   * Two rows in one file claiming the same identity.
+   *
+   * Unique to the bank rail, and the reason it exists is that the bank rail is the one
+   * whose identity this system does not control. A PSP's reference comes from the PSP; a
+   * bank statement row's id comes from whoever converted the bank's export into the shape
+   * this parser reads, and where the bank gives no per-row id — which is most Nigerian
+   * banks — that converter synthesises one. The obvious synthesis is a hash of date, amount
+   * and narration, and the day two customers pay the same ₦5,000 subscription with the same
+   * narration, it produces one id for two credits.
+   *
+   * Nothing about that looks like an error. The second credit is dropped as a redelivery,
+   * the payout it should have confirmed escalates as `MISSING_SETTLEMENT`, and the cash sits
+   * in the bank account permanently invisible to the books. So the identity contract is
+   * checked rather than assumed, and a violation is loud (ADR-0068).
+   */
+  | 'colliding_identity'
+  /**
    * Rows the parser could not read at all.
    *
    * The latest warning, and the one that was already being computed and then discarded with
@@ -171,6 +188,12 @@ export function anomalyKey(source: SourceId, kind: AnomalyKind, detail: string):
 export const ANOMALY_SEVERITY: Readonly<Record<AnomalyKind, number>> = {
   /** The format is not what we thought. Nothing parsed; nothing is being booked. */
   unknown_shape: 3,
+  /**
+   * Two records wearing one identity. Highest, alongside a shape change, because unlike
+   * every other kind here it is not a warning about future correctness — it is money
+   * already being discarded, in this file, on this run.
+   */
+  colliding_identity: 3,
   /** Rows are failing outright. */
   malformed_rows: 2,
   /** A vocabulary moved. Rows are being refused correctly and silently. */

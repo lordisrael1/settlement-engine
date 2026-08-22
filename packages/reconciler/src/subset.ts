@@ -22,7 +22,21 @@ export type SubsetOutcome<T> =
   | { readonly kind: 'unique'; readonly subset: readonly T[] }
   | { readonly kind: 'none' }
   /** More than one combination fits, or the search ran out of budget. We do not guess. */
-  | { readonly kind: 'undecidable' };
+  | { readonly kind: 'undecidable' }
+  /**
+   * The search never ran: more candidates than `maxCandidates` allows.
+   *
+   * Distinct from `none`, and the distinction is the difference between two very different
+   * sentences to a human. `none` means "we compared every combination of your promises
+   * against this payout and none of them fit" — which points at a missing webhook, a
+   * duplicated reference, a real data problem. This means "we did not look", and a queue
+   * entry that says the first when it means the second sends somebody hunting for a
+   * problem that does not exist.
+   *
+   * It was previously invisible: the pool was silently truncated with `.slice()` and the
+   * truncated search reported `none` (ADR-0070).
+   */
+  | { readonly kind: 'not_attempted'; readonly candidates: number; readonly limit: number };
 
 export interface SubsetLimits {
   /** How many promises may be considered at once. */
@@ -33,6 +47,25 @@ export interface SubsetLimits {
   readonly maxSteps: number;
 }
 
+/**
+ * The default bound, and what it means for the shape of the deployment.
+ *
+ * 24 candidates is a *small-batch* bound, and that has to be said plainly rather than
+ * discovered: a busy merchant's daily payout routinely covers 50–500 charges, and against
+ * such a payout this search does not fail to find an answer — it declines to start
+ * (`not_attempted`, raised as `BATCH_TOO_LARGE`).
+ *
+ * That is survivable today only because arithmetic matching is the *fallback*. Every PSP
+ * this repository has an adapter for ships itemised settlement files, so the reference path
+ * carries the volume and the subset search handles the residue. A provider that reports
+ * payout totals without per-line references would put every large payout through here, and
+ * every large payout would escalate.
+ *
+ * So the number is configurable rather than fixed — `RECON_SUBSET_MAX_CANDIDATES` — and the
+ * cost of raising it is stated in `PERFORMANCE.md`: the search is exponential in the
+ * candidate count, `maxSteps` is the thing that actually stops it, and raising candidates
+ * without raising steps buys `undecidable` rather than answers. See ADR-0070.
+ */
 export const DEFAULT_SUBSET_LIMITS: SubsetLimits = {
   maxCandidates: 24,
   maxSubsetSize: 12,
@@ -55,7 +88,15 @@ export function uniqueSubsetSummingTo<T>(
 ): SubsetOutcome<T> {
   if (target <= 0n) return { kind: 'none' };
 
-  const pool = items.filter((item) => valueOf(item) > 0n).slice(0, limits.maxCandidates);
+  const positive = items.filter((item) => valueOf(item) > 0n);
+  // Refused rather than truncated. Slicing the pool and searching what is left produces a
+  // confident `none` about a question nobody asked — the honest answer is that the search
+  // was out of scope, and the caller escalates it as exactly that.
+  if (positive.length > limits.maxCandidates) {
+    return { kind: 'not_attempted', candidates: positive.length, limit: limits.maxCandidates };
+  }
+
+  const pool = positive;
   const values = pool.map(valueOf);
 
   // Largest reachable sum from index i onwards, so a branch that can no longer reach the

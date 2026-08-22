@@ -55,9 +55,34 @@ services:
       RECON_MERCHANT: demo-merchant
       RECON_BANK_ACCOUNT: gtb-3011
       RECON_BANK: gtbank
+      # Reconcile every fifteen minutes.
+      #
+      # Without this — or an external cron calling POST /reconcile/runs — nothing in the
+      # process reconciles, no exception is ever raised, and the empty queue reads exactly
+      # like a clean set of books (ADR-0074). It is on here because a compose file is one
+      # replica by definition; a deployment scaling the service past one should turn it off
+      # and drive runs from a single scheduler instead, since a concurrent second run
+      # duplicates the work (it duplicates no writes — every one of them is keyed).
+      RECON_RECONCILE_INTERVAL_MS: 900000
+      # Every caller shares this compose network, and there is no proxy in front of it, so
+      # the built-in per-caller ceiling is the only one there is. A real deployment puts a
+      # WAF or gateway limit in front of /webhooks/:source — this one is per-process and
+      # in-memory, which two replicas defeat by arithmetic (ADR-0074).
+      RECON_RATE_WEBHOOK_PER_MINUTE: 1200
+      RECON_RATE_MANAGEMENT_PER_MINUTE: 600
+      # No human is going to open a bank portal for a demo, and an alert that fires on the
+      # first afternoon is an alert somebody learns to ignore. Turned OFF here and ON in
+      # production, where it is the only control over a fabricated bank statement
+      # (ADR-0068). See "The trust boundary" in the README.
+      RECON_ALERT_ATTESTATION_AGE_MS: 0
     healthcheck:
-      # Reports the database and how far behind the inbox workers are. A port-open check
-      # would hide a service that accepts deliveries and stops working them.
+      # Reports the database, how far behind the inbox workers are, and — since ADR-0074 —
+      # a verdict: 503 once a threshold is breached, so this check fails on a stalled
+      # worker or a dead scheduler rather than only on a dead process.
+      #
+      # Deliberately a *health*check and not a liveness probe. Compose restarts nothing on
+      # this; on an orchestrator it belongs on readiness, because a degraded service is up
+      # and restarting it fixes nothing.
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:8080/health || exit 1']
       interval: 10s
       timeout: 3s
@@ -70,6 +95,9 @@ services:
   #   docker compose run --rm cli node apps/pipeline/dist/main.js replay --rebuild
   #   docker compose run --rm cli node apps/pipeline/dist/main.js evidence-retention
   #   docker compose run --rm cli node apps/pipeline/dist/main.js evidence-retention --apply
+  #   docker compose run --rm cli node apps/pipeline/dist/main.js reserves
+  #   docker compose run --rm cli node apps/pipeline/dist/main.js attest-bank
+  #   docker compose run --rm cli node apps/pipeline/dist/main.js attest-bank --balance=1450320.55
   cli:
     build: .
     profiles: ['cli']
@@ -84,6 +112,10 @@ services:
       # the service has — and, on a real deployment, a narrower one: it needs Decrypt, and
       # nothing gives it the power to destroy a key.
       RECON_EVIDENCE_KEY: k1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+      # Who is attesting, when the CLI records a bank check. A person, not a service
+      # account: an attestation is a human asserting something the machine cannot, and it is
+      # appended with their name on it (ADR-0068).
+      RECON_OPERATOR: cli
     command: ['node', 'apps/pipeline/dist/main.js', 'demo']
 
 volumes:

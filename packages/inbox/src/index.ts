@@ -40,6 +40,7 @@ export {
   inboxDepth,
   inboxOriginals,
   redactInboxOriginals,
+  retryAfter,
   INBOX_MIGRATIONS_DIR,
   type Accepted,
   type ClaimedDelivery,
@@ -49,5 +50,6 @@ export {
   type DrainOptions,
   type DrainReport,
   type InboundDelivery,
+  type InboxDepth,
   type Redactor,
 } from './inbox.js';

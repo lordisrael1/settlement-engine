@@ -125,6 +125,24 @@ export class DriftWatch {
   }
 
   /**
+   * A second row in this file claiming an identity an earlier row already claimed.
+   *
+   * The `detail` is the format rather than the colliding id, for the reason `malformedRow`
+   * keys on the format: a converter with a colliding id scheme produces a *class* of
+   * collisions, and one anomaly per collision would be a log. The queue entry that matters
+   * says "this converter's ids are not unique", counted; the individual rows are rejected
+   * separately and carry the ids.
+   */
+  collidingIdentity(id: string, lineage: RowLineage = NO_LINEAGE): void {
+    this.observe({
+      kind: 'colliding_identity',
+      detail: this.format,
+      sample: id.slice(0, 200),
+      lineage,
+    });
+  }
+
+  /**
    * A row the parser could not read.
    *
    * The reason is *not* part of the key. Parser messages carry row-specific text — an

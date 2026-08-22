@@ -140,6 +140,14 @@ export interface DrainOptions {
    * problem. A poison payload retried forever is an infinite loop with a log file.
    */
   readonly maxAttempts?: number;
+  /**
+   * How long to wait before a delivery that threw may be claimed again.
+   *
+   * Overridable so a test can drain without waiting and an operator can widen the window
+   * for a provider whose outages last longer than ours. The default is exponential with
+   * deterministic jitter — see `retryAfter`.
+   */
+  readonly backoff?: (attempts: number, deliveryId: string) => number;
   /** The clock, as an argument (determinism). */
   readonly at: Date;
   /**
@@ -170,9 +178,45 @@ export interface DrainReport {
    * before somebody reads the table is this number.
    */
   readonly redacted: number;
+  /**
+   * Deliveries that threw and are now waiting out a backoff, at the end of this pass.
+   *
+   * Reported because a stalled queue and a backing-off queue look identical from a pending
+   * count alone: both are a number that is not going down. One of them is the system working
+   * exactly as designed and the other is an incident.
+   *
+   * Reported on every pass, including the ones that claim nothing, because that is the case
+   * it disambiguates: a drain that claimed nothing from an empty queue and one that claimed
+   * nothing because every pending delivery is waiting out a backoff look identical otherwise,
+   * and they want opposite reactions.
+   */
+  readonly deferred: number;
 }
 
 const DEFAULTS = { limit: 100, maxAttempts: 8 };
+
+/**
+ * How long a delivery waits after its nth failure.
+ *
+ * Exponential from one second, doubling, capped at five minutes: 1s, 2s, 4s … 256s, 300s.
+ * Eight attempts span roughly nine minutes rather than the four seconds a fixed interval
+ * gave them, which is the difference between surviving a deadlock and discarding a payment
+ * over one.
+ *
+ * The jitter is **derived from the delivery id**, not drawn from a random source. Two
+ * workers must compute the same delay for the same row — otherwise a redrained queue is not
+ * reproducible, and this package's whole claim is that it can be interrupted and resumed
+ * without changing what happens (determinism). The id is already a SHA-256, so its low bits
+ * are already uniform; ±12.5% is enough to stop a thousand deliveries that failed together
+ * from returning together.
+ */
+export function retryAfter(attempts: number, deliveryId: string): number {
+  const base = Math.min(1000 * 2 ** Math.max(0, attempts - 1), 300_000);
+  // Last two hex digits: 0–255, mapped to −12.5%…+12.5% of the base delay.
+  const entropy = Number.parseInt(deliveryId.slice(-2), 16);
+  const spread = Number.isNaN(entropy) ? 128 : entropy;
+  return Math.round(base * (0.875 + (spread / 255) * 0.25));
+}
 
 /**
  * Work the inbox: claim a delivery, give it meaning, record what it meant.
@@ -194,6 +238,7 @@ export async function drain(
 ): Promise<DrainReport> {
   const limit = options.limit ?? DEFAULTS.limit;
   const maxAttempts = options.maxAttempts ?? DEFAULTS.maxAttempts;
+  const backoff = options.backoff ?? retryAfter;
 
   let claimed = 0;
   let processed = 0;
@@ -208,7 +253,7 @@ export async function drain(
 
     try {
       const outcome = await inTransaction(db, async (client) => {
-        const delivery = await claim(client, maxAttempts);
+        const delivery = await claim(client, maxAttempts, options.at);
         if (!delivery) return null;
         attempted = delivery;
 
@@ -255,13 +300,36 @@ export async function drain(
       // and the cap that makes it somebody's problem would never be reached.
       if (!attempted) throw error;
       claimed += 1;
-      const gaveUp = await recordFailure(db, attempted, error, maxAttempts);
+      const gaveUp = await recordFailure(db, attempted, error, maxAttempts, options.at, backoff);
       if (gaveUp) failed += 1;
       else retrying += 1;
     }
   }
 
-  return { claimed, processed, ignored, rejected, retrying, failed, redacted };
+  return {
+    claimed,
+    processed,
+    ignored,
+    rejected,
+    retrying,
+    failed,
+    redacted,
+    // Counted on every pass, including the ones that claimed nothing — which is where it
+    // matters most. "Claimed 0" alone is ambiguous between an empty queue and a queue that
+    // is entirely backing off, and those want opposite reactions. The cost is one COUNT over
+    // a partial index beside the claim query the pass already ran.
+    deferred: await deferredCount(db, options.at),
+  };
+}
+
+/** Pending, tried, and not yet due. The difference between backing off and stuck. */
+async function deferredCount(db: Executor, at: Date): Promise<number> {
+  const result = await db.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM webhook_inbox
+      WHERE state = 'pending' AND next_attempt_at IS NOT NULL AND next_attempt_at > $1`,
+    [at],
+  );
+  return Number(result.rows[0]?.count ?? '0');
 }
 
 /**
@@ -346,7 +414,11 @@ export async function inboxOriginals(
   return { originals: Number(row?.count ?? '0'), oldest: row?.oldest ?? null };
 }
 
-async function claim(db: Executor, maxAttempts: number): Promise<ClaimedDelivery | null> {
+async function claim(
+  db: Executor,
+  maxAttempts: number,
+  at: Date,
+): Promise<ClaimedDelivery | null> {
   const result = await db.query<{
     delivery_id: string;
     source: string;
@@ -355,13 +427,18 @@ async function claim(db: Executor, maxAttempts: number): Promise<ClaimedDelivery
     received_at: Date;
     attempts: number;
   }>(
+    // `next_attempt_at IS NULL` is a delivery that has never failed — the overwhelming
+    // majority, and the reason the column is nullable rather than defaulted to the accept
+    // time: a first attempt must never wait, and a NULL says so without arithmetic.
     `SELECT delivery_id, source, headers, raw, received_at, attempts
        FROM webhook_inbox
-      WHERE state = 'pending' AND attempts < $1
+      WHERE state = 'pending'
+        AND attempts < $1
+        AND (next_attempt_at IS NULL OR next_attempt_at <= $2)
       ORDER BY received_at, delivery_id
       LIMIT 1
         FOR UPDATE SKIP LOCKED`,
-    [maxAttempts],
+    [maxAttempts, at],
   );
 
   const row = result.rows[0];
@@ -377,23 +454,36 @@ async function claim(db: Executor, maxAttempts: number): Promise<ClaimedDelivery
     : null;
 }
 
-/** Returns `true` when this was the attempt that used the last one. */
+/**
+ * Record a throw, and say when this delivery may be tried again.
+ *
+ * Returns `true` when this was the attempt that used the last one.
+ *
+ * The delay is computed here rather than in SQL because it is policy, and policy that a
+ * caller can replace: a test drains with `backoff: () => 0` and gets the old behaviour
+ * without waiting nine minutes to assert on it.
+ */
 async function recordFailure(
   db: Executor,
   delivery: ClaimedDelivery,
   error: unknown,
   maxAttempts: number,
+  at: Date,
+  backoff: (attempts: number, deliveryId: string) => number,
 ): Promise<boolean> {
   const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  const attempts = delivery.attempts + 1;
+  const dueAt = new Date(at.getTime() + backoff(attempts, delivery.deliveryId));
 
   const result = await db.query<{ state: string }>(
     `UPDATE webhook_inbox
         SET attempts = attempts + 1,
             last_error = $2,
-            state = CASE WHEN attempts + 1 >= $3 THEN 'failed' ELSE 'pending' END
+            state = CASE WHEN attempts + 1 >= $3 THEN 'failed' ELSE 'pending' END,
+            next_attempt_at = $4
       WHERE delivery_id = $1
         RETURNING state`,
-    [delivery.deliveryId, message.slice(0, 2000), maxAttempts],
+    [delivery.deliveryId, message.slice(0, 2000), maxAttempts, dueAt],
   );
 
   return result.rows[0]?.state === 'failed';
@@ -471,16 +561,45 @@ export async function deliveryAt(db: Executor, id: string): Promise<DeliveryReco
  * starts complaining, and `failed` is a count of deliveries nobody will ever look at again
  * unless this reports them.
  */
-export async function inboxDepth(db: Executor): Promise<{ pending: number; failed: number }> {
-  const result = await db.query<{ state: string; count: string }>(
-    `SELECT state, COUNT(*)::text AS count
-       FROM webhook_inbox WHERE state IN ('pending', 'failed') GROUP BY state`,
+export async function inboxDepth(
+  db: Executor,
+  at: Date = new Date(),
+): Promise<InboxDepth> {
+  const result = await db.query<{ state: string; deferred: boolean; count: string }>(
+    `SELECT state,
+            (state = 'pending' AND next_attempt_at IS NOT NULL AND next_attempt_at > $1)
+              AS deferred,
+            COUNT(*)::text AS count
+       FROM webhook_inbox
+      WHERE state IN ('pending', 'failed')
+      GROUP BY 1, 2`,
+    [at],
   );
 
-  const depth = { pending: 0, failed: 0 };
+  const depth = { pending: 0, failed: 0, deferred: 0, oldestPendingAt: null as Date | null };
   for (const row of result.rows) {
-    if (row.state === 'pending') depth.pending = Number(row.count);
-    if (row.state === 'failed') depth.failed = Number(row.count);
+    if (row.state === 'failed') depth.failed += Number(row.count);
+    if (row.state === 'pending') {
+      depth.pending += Number(row.count);
+      if (row.deferred) depth.deferred += Number(row.count);
+    }
   }
+
+  // The age of the oldest thing nobody has worked. A count alone cannot tell a busy minute
+  // from a worker that stopped an hour ago, and the second is the one worth waking for.
+  const oldest = await db.query<{ oldest: Date | null }>(
+    `SELECT MIN(received_at) AS oldest FROM webhook_inbox WHERE state = 'pending'`,
+  );
+  depth.oldestPendingAt = oldest.rows[0]?.oldest ?? null;
+
   return depth;
+}
+
+export interface InboxDepth {
+  readonly pending: number;
+  readonly failed: number;
+  /** Pending, but waiting out a retry backoff rather than waiting for a worker. */
+  readonly deferred: number;
+  /** When the oldest unworked delivery arrived, or `null` when there are none. */
+  readonly oldestPendingAt: Date | null;
 }

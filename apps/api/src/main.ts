@@ -4,6 +4,7 @@ import { RECONCILER_MIGRATIONS_DIR } from '@recon/reconciler';
 
 import { buildApp } from './app.js';
 import { configFromEnv } from './config.js';
+import { startReconcileScheduler } from './scheduler.js';
 import { startInboxWorker } from './worker.js';
 
 /**
@@ -69,6 +70,49 @@ async function main(): Promise<void> {
     (error) => app.log.error({ err: error }, 'inbox drain failed'),
   );
 
+  /**
+   * The other loop: the one that actually reconciles.
+   *
+   * `null` when `RECON_RECONCILE_INTERVAL_MS` is unset, which is the default, because a
+   * deployment driving runs from its own cron must not also have an internal timer racing
+   * it. A deployment that sets neither reconciles only when a person remembers to — and the
+   * `reconciliation_stale` alert on `/health` is what stops that being a silent state
+   * (ADR-0074).
+   */
+  const scheduler = startReconcileScheduler(
+    pool,
+    config,
+    () => new Date(),
+    (run) =>
+      app.log.info(
+        {
+          booked: run.booked.length,
+          exceptions: run.exceptions.length,
+          queue: run.queue,
+          window: run.window,
+          failures: run.failures.length,
+        },
+        'reconciled',
+      ),
+    (error) => app.log.error({ err: error }, 'scheduled reconciliation failed'),
+  );
+
+  if (scheduler) {
+    app.log.info(
+      { intervalMs: config.reconcileIntervalMs },
+      'reconciling on a schedule; a second replica will duplicate the work harmlessly',
+    );
+  } else {
+    // Said at boot, once, because the absence is invisible afterwards and it is the
+    // difference between a system that surfaces anomalies and one that could.
+    app.log.warn(
+      'RECON_RECONCILE_INTERVAL_MS is unset: nothing in this process will reconcile. ' +
+        'Drive POST /reconcile/runs from a cron, or set it. Until a run happens, no ' +
+        'difference between the three records is looked for and the exception queue stays ' +
+        'empty for the wrong reason.',
+    );
+  }
+
   await app.listen({ host: config.host, port: config.port });
 
   /**
@@ -89,6 +133,7 @@ async function main(): Promise<void> {
       try {
         await app.close();
         await worker.stop();
+        await scheduler?.stop();
         await pool.end();
         process.exitCode = 0;
       } catch (error) {

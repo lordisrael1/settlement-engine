@@ -23,8 +23,8 @@ import type { Config } from './config.js';
  */
 export function interpretDelivery(config: Config, now: () => Date): DeliveryHandler {
   return async (delivery, db) => {
-    const secret = config.webhookSecret(delivery.source);
-    if (!secret) {
+    const secret = config.webhookSecrets(delivery.source);
+    if (secret.length === 0) {
       // Thrown, not rejected: this delivery is fine and our configuration is not. A
       // rejection would discard a real payment because somebody forgot an environment
       // variable, whereas a throw retries and eventually surfaces as a failed delivery
@@ -45,10 +45,26 @@ export function interpretDelivery(config: Config, now: () => Date): DeliveryHand
 
     switch (result.kind) {
       case 'unverified':
-        // It verified at the door and does not verify now, so the secret changed in
-        // between. Retrying cannot help; a person must decide whether to restore the old
-        // secret and re-drain, and the bytes are still here for them either way.
-        return { state: 'rejected', detail: 'signature no longer verifies — secret rotated?' };
+        // It verified at the door and does not verify against *any* secret we now hold, so
+        // the secret was rotated and the previous one was not kept. Retrying cannot help —
+        // the bytes are fixed and so is the ring — and this is terminal for that reason
+        // rather than as a policy: a person restores the old secret as
+        // RECON_WEBHOOK_SECRET_<SOURCE>_PREVIOUS and re-queues, and the bytes are still here
+        // for them either way.
+        //
+        // The overlap window exists so this branch is unreachable during an ordinary
+        // rotation. Reaching it means the old secret was dropped while a backlog existed,
+        // and the message says so, because the alternative is an operator concluding that
+        // the provider sent a bad payload (ADR-0073).
+        return {
+          state: 'rejected',
+          detail:
+            `signature verified at acceptance and verifies against none of the ` +
+            `${secret.length} secret(s) now configured for "${delivery.source}". This is an ` +
+            `authentic delivery that a rotation stranded: set ` +
+            `RECON_WEBHOOK_SECRET_${delivery.source.toUpperCase()}_PREVIOUS to the old secret ` +
+            `and re-queue it.`,
+        };
 
       case 'ignored':
         return { state: 'ignored', detail: result.reason };

@@ -42,7 +42,18 @@ That starts Postgres and the service, applies migrations under an advisory lock,
 8080 and begins draining the webhook inbox.
 
     curl localhost:8080/health
-    # {"status":"ok","database":"reachable","inbox":{"pending":0,"failed":0}}
+    # {"status":"ok","database":"reachable",
+    #  "inbox":{"pending":0,"failed":0,"deferred":0,"oldestPendingAt":null},
+    #  "alerts":[]}
+
+`/health` reaches a verdict rather than only reporting numbers: it answers **503** once a
+threshold is breached, with a sentence per breach in `alerts`. That is the last mile — a
+queue that grows all weekend, a worker that died, a delivery nobody will retry, and a
+reconciliation that has not run since Tuesday are all things an existing uptime monitor can
+now find out about without anybody remembering to look
+([ADR-0074](docs/adr/0074-the-last-mile-is-a-schedule-and-a-verdict.md)). Use it as a
+readiness or alerting target, not as a liveness probe: a degraded service is up, and
+restarting it fixes nothing.
 
     curl -H 'x-api-key: local-dev-key-0123456789' localhost:8080/balances
     curl -X POST -H 'x-api-key: local-dev-key-0123456789' localhost:8080/reconcile/runs
@@ -72,7 +83,7 @@ hash is its identity:
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Database reachability and inbox depth. No authentication. |
+| `GET` | `/health` | Database reachability, inbox depth, and a verdict. 503 when a threshold is breached. No authentication. |
 | `POST` | `/webhooks/:source` | 200 accepted · 401 bad signature · 404 unknown source · 503 no secret configured |
 | `GET` | `/deliveries/:deliveryId` | What became of an accepted webhook, down to the ledger transaction id |
 | `GET` | `/balances` | Every account, its meaning, and its balance in kobo |
@@ -81,6 +92,9 @@ hash is its identity:
 | `POST` | `/reconcile/runs` | Runs allocation and bank confirmation; returns what was concluded and booked |
 | `GET` | `/reconciliation/summary?from&to` | Matched, explained and exception counts, plus money reported and not yet banked |
 | `GET` | `/exceptions`, `/exceptions/:key` | The queue, worst first, with the candidates the matcher rejected |
+| `GET` | `/reserves` | Money a PSP withheld and has not returned, oldest first, overdue ones flagged |
+| `GET` | `/bank/position` | Our books against the bank's own running balance. Does **not** prove the statement came from the bank |
+| `POST` | `/bank/attestations` | Record that a named person compared the books to the bank's portal. Append-only |
 | `POST` | `/exceptions/:key/resolve` | Records a maker-checked resolution; an unapproved write-off is a 422 |
 | `GET` | `/ingest/anomalies` | Foreign formats that have moved, worst first ([ADR-0067](docs/adr/0067-format-drift-is-a-record-not-a-counter.md)) |
 | `POST` | `/ingest/anomalies/:key/acknowledge` | Take ownership of a drift; it stays owned when the next file shows it again |
@@ -128,8 +142,10 @@ The same libraries, driven from the command line:
 | `replay [--rebuild]` | Fold the event log from genesis and check every projection against it |
 | `ingest-settlement <source> <file>` | Store a provider's report; books nothing |
 | `ingest-bank <file> [bank-id]` | Store a bank statement |
-| `reconcile` | Allocation, then bank confirmation |
+| `reconcile [--limit=N]` | Allocation, then bank confirmation. Says in yellow when it read a sample rather than the books. |
 | `exceptions` | The queue, worst first |
+| `reserves` | Money a PSP withheld and has not returned, oldest first |
+| `attest-bank [--balance=<naira>] [--note=...]` | Print our books against the bank's own closing balance; with `--balance`, record that a person checked the portal |
 | `evidence-retention [--apply]` | Move every document to the state its retention schedule says. A dry run without `--apply`. |
 
 Every command is idempotent: running it twice moves no money. For a clean run, start from
@@ -148,19 +164,102 @@ Configuration arrives as environment variables; see [.env.example](.env.example)
 | `RECON_RETENTION_ORIGINAL_DAYS`, `RECON_RETENTION_REDACTED_DAYS`, `RECON_RETENTION_INBOX_DAYS` | The retention schedule, in days. Defaults 30 / 2192 / 30. |
 | `RECON_EXPORT_TTL_MS` | How long an export link lives. Default 15 minutes. |
 | `RECON_WEBHOOK_SECRET_<SOURCE>` | Per-source webhook signing secret. A source without one answers 503. |
+| `RECON_WEBHOOK_SECRET_<SOURCE>_PREVIOUS` | The outgoing secret during a rotation. Both are tried, so a backlog signed with the old one is not discarded ([ADR-0073](docs/adr/0073-retries-back-off-and-secrets-overlap.md)) |
 | `RECON_MERCHANT` | Whose books these are. Fee contracts are negotiated per merchant. |
 | `RECON_BANK_ACCOUNT`, `RECON_BANK` | Which of our own accounts an upload is about when the request does not say |
-| `RECON_DRAIN_INTERVAL_MS`, `RECON_DRAIN_BATCH`, `RECON_DRAIN_MAX_ATTEMPTS` | Inbox worker tuning |
+| `RECON_DRAIN_INTERVAL_MS`, `RECON_DRAIN_BATCH`, `RECON_DRAIN_MAX_ATTEMPTS` | Inbox worker tuning. Retries back off exponentially between attempts, so eight of them span minutes rather than seconds. |
+| `RECON_RECONCILE_INTERVAL_MS` | Reconcile on a schedule. **0 (the default) means nothing in the process reconciles** — drive `POST /reconcile/runs` from a cron instead, and see the warning the service logs at boot. |
+| `RECON_RECONCILE_LIMIT` | How many records one run may consider. A run that hits it says so, and stops clearing exceptions it could not see ([ADR-0075](docs/adr/0075-clearing-is-bounded-by-what-the-run-saw.md)). Default 1000. |
+| `RECON_SUBSET_MAX_CANDIDATES`, `RECON_SUBSET_MAX_SIZE`, `RECON_SUBSET_MAX_STEPS` | The bounded subset search. The default of 24 candidates is a *small-batch* bound; raising it is exponential, so raise `MAX_STEPS` with it ([ADR-0070](docs/adr/0070-arithmetic-matching-is-a-small-batch-feature.md)). |
+| `RECON_RATE_WEBHOOK_PER_MINUTE`, `RECON_RATE_MANAGEMENT_PER_MINUTE`, `RECON_RATE_MAX_KEYS` | Per-caller request ceiling, per process. 0 disables. This is the floor, not the control — see Deployment below. |
+| `RECON_ALERT_INBOX_PENDING`, `RECON_ALERT_INBOX_FAILED`, `RECON_ALERT_INBOX_AGE_MS`, `RECON_ALERT_OPEN_EXCEPTIONS`, `RECON_ALERT_RECONCILE_AGE_MS`, `RECON_ALERT_ATTESTATION_AGE_MS` | When `/health` stops saying it is fine. Each 0 disables that verdict. |
+| `RECON_TRUST_PROXY` | `true` behind a load balancer. Without it every caller shares the balancer's address, and the per-address rate limit becomes a global one. |
 | `PORT`, `LOG_LEVEL` | Defaults 8080 and `info` |
+
+### Deployment requirements
+
+Three things this service does not do for itself, stated as requirements rather than left to
+be discovered:
+
+**Reconciliation must be driven.** Set `RECON_RECONCILE_INTERVAL_MS`, or run
+`POST /reconcile/runs` from a cron. Not both, and not on more than one replica: every write a
+run performs is keyed so a concurrent second run duplicates nothing, but it duplicates the
+work. If neither is done, exceptions are never raised and the queue stays empty for the wrong
+reason — which is why `/health` reports `reconciliation_stale`.
+
+**Rate limiting belongs at the edge.** The built-in limiter is per-process and in-memory: two
+replicas allow twice the rate, a restart forgets everything, and an attacker with a thousand
+source addresses is a thousand callers. Put a WAF or gateway limit in front of
+`/webhooks/:source`, keep `RECON_WEBHOOK_BYTES` tight, and set `RECON_TRUST_PROXY=true` so the
+in-process limiter sees real client addresses.
+
+**Somebody has to compare the books to the bank.** See *The trust boundary* below.
+
+## The trust boundary
+
+Cash is booked from an **uploaded file**, and nothing proves that file came from the bank.
+
+`POST /ingest/bank` is behind an API key and that is the whole of the control. Anyone holding
+an ingest key can produce a "bank statement" that confirms inflows and moves `psp_receivable`
+into `bank_account`. There is no signature on the bytes, no feed, and — because this system has
+no direct line to the bank — no independent balance to diverge from.
+
+`verify` does not catch this and cannot. It proves *internal conservation*: every transaction
+balances, the entries sum to zero, the cache agrees with the entries. A fabricated statement
+that balances passes all of it trivially. **"The books are internally consistent" and "the
+books match reality" are different claims, and only the first is enforced by code.**
+
+Two things narrow it, and neither is a fix:
+
+    curl -H 'x-api-key: ...' localhost:8080/bank/position
+
+compares `bank_account`, summed from entries, to the running balance on the last statement
+line ingested. This is free and automatic and catches the ordinary failure — a half-ingested
+statement, a rejected credit, a debit nobody modelled. It proves nothing about provenance: a
+fabricated file carries a fabricated running balance and agrees with itself perfectly.
+
+    docker compose run --rm cli node apps/pipeline/dist/main.js attest-bank --balance=1450320.55
+
+records that a **named person** opened the bank's own portal and compared. Append-only.
+`/health` raises `bank_unattested` when a week passes without one.
+
+A difference between the two numbers is *expected*: the real account holds movements this
+system does not model — supplier payments, salaries, standing orders. The question is not
+whether it is zero but whether anybody can say what it consists of, which is what the
+attestation's note is for.
+
+The open-banking feed on the roadmap is what replaces this. Until it exists, the honest
+control is a human on a schedule, and it is written down here because a reviewer will find it
+([ADR-0068](docs/adr/0068-the-bank-file-is-the-trust-boundary.md)).
+
+### The bank-file contract
+
+The conversion from a bank's own CSV into the shape `/ingest/bank` accepts lives outside this
+repository, because every Nigerian bank exports something different and the per-bank knowledge
+belongs where it is maintained ([ADR-0057](docs/adr/0057-bank-evidence-arrives-as-an-upload.md)).
+Two clauses of that hand-off are now checked rather than assumed:
+
+**`id` must be unique within the account, forever.** Most Nigerian bank exports have no
+per-row id, so a converter synthesises one — and the obvious synthesis, a hash of date, amount
+and narration, collides the day two customers pay the same ₦5,000 subscription with the same
+narration. **Include the running balance or a within-file sequence**: `${date}:${seq}` is
+enough. A repeated id inside one file is refused; a row conflicting with a *different* stored
+row is refused and queued as `BANK_LINE_COLLISION`, severity 3. Re-uploading an unchanged file
+is still a silent no-op.
+
+**`date` must be ISO-8601** — `YYYY-MM-DD`, read as UTC midnight, or a full timestamp.
+`new Date("02/01/2026")` is the 1st of February in every JavaScript engine and a Nigerian
+export written DD/MM means the 2nd of January, which is a month of drift into the window that
+decides whether a credit can match a payout at all.
 
 ## Development
 
     npm install
     npm run build
-    npm test                    # 115 tests; suites needing a database skip themselves
+    npm test                    # 137 tests; suites needing a database skip themselves
 
     docker compose up -d postgres
-    DATABASE_URL=postgres://recon:recon@localhost:5432/recon npm test    # 226 tests
+    DATABASE_URL=postgres://recon:recon@localhost:5432/recon npm test    # 257 tests
 
 The database suites need a real Postgres, because the invariants they assert are enforced by
 Postgres. Each suite takes its own schema, so they can run concurrently.
@@ -214,7 +313,20 @@ Dependencies point one way only, toward `canon`. There are no cycles.
 - Full lineage: every record traces to the SHA-256 of its source file and to the row inside
   it.
 - A durable exception queue that deduplicates across runs, escalates when a window passes,
-  closes itself when evidence arrives, and carries the near-misses the matcher rejected.
+  closes itself when evidence arrives, and carries the near-misses the matcher rejected — and
+  that clears **only what a run actually looked at**, never an item a person has acknowledged
+  ([ADR-0075](docs/adr/0075-clearing-is-bounded-by-what-the-run-saw.md)).
+- Reserves with a deadline: a withholding becomes a dated obligation the moment it books, a
+  release clears it oldest-first, and one past its date is chased. Without this, a PSP that
+  returns reserves on schedule and one that never returns any produce identical books
+  ([ADR-0071](docs/adr/0071-reserves-carry-a-deadline.md)).
+- Partial refunds and partial chargebacks: a ₦3,000 refund against a ₦10,000 charge takes back
+  ₦3,000 and leaves the rest waiting for its payout
+  ([ADR-0069](docs/adr/0069-partial-refunds-and-chargebacks.md)).
+- Same-amount bank credits paired as a *set* where the set is unambiguous even though no
+  member of it is — the ordinary Tuesday of a fixed-price business, and otherwise a queue whose
+  depth tracks transaction volume
+  ([ADR-0072](docs/adr/0072-same-amount-credits-are-paired-as-a-set.md)).
 - Maker-checked human resolutions that post their own compensating entries and can never
   touch `bank_account`.
 - A data-protection boundary: a delivery or upload carrying a card number or sensitive
@@ -226,14 +338,74 @@ Dependencies point one way only, toward `canon`. There are no cycles.
   prove the balances can be rebuilt from it.
 - A seeded adversarial simulator that generates a messy day, declares in advance what every
   planted anomaly is, and drives it in every arrival order.
+- Operational honesty: retries that back off with deterministic jitter, a webhook secret ring
+  so a rotation does not discard a backlog, a fixed lock order on the balance cache, a
+  per-caller rate ceiling on the unauthenticated rail, and a `/health` that answers 503 rather
+  than leaving a number for nobody to read
+  ([ADR-0073](docs/adr/0073-retries-back-off-and-secrets-overlap.md),
+  [ADR-0074](docs/adr/0074-the-last-mile-is-a-schedule-and-a-verdict.md)).
+
+## Known limits
+
+Stated here rather than left to be discovered. Each one is a real boundary of what this system
+claims, not a bug list.
+
+**Only a person can tell you the books match the bank.** Cash is booked from an uploaded file
+and nothing proves its provenance. See *The trust boundary* above.
+
+**NGN only.** A webhook in any other currency is `ignored` with a reason, and it is *ignored*
+rather than queued — so a Nigerian merchant taking international card payments settled in USD
+and converted has those payments silently absent from reconciliation rather than visibly
+unmatched. The ledger has one currency, `Money` will not combine two, and multi-currency is a
+change to the chart of accounts and every balance, not a configuration flag.
+
+**Arithmetic-only matching is a small-batch feature.** The bounded subset search considers 24
+candidates by default. A payout batching more than that is escalated as `BATCH_TOO_LARGE` —
+honestly, saying it was never attempted — rather than reported as unmatched. This is survivable
+because every PSP with an adapter here ships itemised settlement files, so the reference path
+carries the volume ([ADR-0070](docs/adr/0070-arithmetic-matching-is-a-small-batch-feature.md)).
+
+**Three credits against two same-amount payouts still escalates all three.** Set pairing needs
+the two sides to be the same size; sizing it correctly when they are not needs the bank's own
+running balance to disambiguate.
+
+**One hot row per account.** Every booking for a merchant contends on the `psp_receivable`
+balance row, so adding workers stops raising throughput past that point. Lock *ordering* is
+fixed, so this costs latency rather than deadlocks — but it is a design property of the cache
+and no index fixes it. The options are per-account sharding or dropping the cache to a
+periodically-materialised view with `verifyBalances` as the source of truth; both are deferred
+([ADR-0053](docs/adr/0053-scaling-decisions-built-and-deferred.md)).
+
+**Static keys make maker-checker only as strong as key custody.** Self-approval is genuinely
+refused, in the application layer and again by a database check. But one person holding two
+principals' keys satisfies "a different approver". An identity provider is the real fix;
+`authenticate` is the function that changes
+([ADR-0066](docs/adr/0066-pci-scope-and-evidence-access.md)).
+
+**This system cannot see whether the customer got what they paid for.** "Charged but never
+provisioned" and "provisioned but never charged" are outside it by design — the product
+database is not a fourth record, and the merchant must cover that with a join on the payment
+reference stored here. Worth saying plainly rather than letting a reader assume this is a
+complete revenue-integrity check
+([ADR-0049](docs/adr/0049-the-product-database-is-not-a-record.md)).
+
+**Reserves withheld before ADR-0071 shipped have no hold rows** and will not be chased by this
+mechanism. Backfilling is possible from `entries` and is deliberately not automatic: the
+deadline would be derived from a schedule nobody agreed to at the time.
 
 ## Roadmap
 
 - **Dashboard.** No UI exists; the queue and the books are reachable over HTTP and from the
   CLI only.
-- **Bank feeds.** Bank evidence arrives as an uploaded statement. A direct or open-banking
-  feed goes behind the same boundary and must carry data-availability state as data
-  ([ADR-0057](docs/adr/0057-bank-evidence-arrives-as-an-upload.md)).
+- **Bank feeds.** Bank evidence arrives as an uploaded statement, which is why provenance is a
+  human control today. A direct or open-banking feed goes behind the same boundary, must carry
+  data-availability state as data, and is what turns the attestation from a control into a
+  cross-check ([ADR-0057](docs/adr/0057-bank-evidence-arrives-as-an-upload.md),
+  [ADR-0068](docs/adr/0068-the-bank-file-is-the-trust-boundary.md)).
+- **Multi-currency.** NGN is hardcoded through the chart of accounts, `Money`, and every
+  balance. A merchant settling in USD needs a currency dimension on accounts and balances, an
+  FX rate as dated administered data beside the fee contracts, and a decision about which
+  moment the rate is taken at. None of that is a flag.
 - **Capacity work.** Partitioning, index shaping, pool sizing and load testing are
   deliberately deferred until there is traffic to measure
   ([ADR-0053](docs/adr/0053-scaling-decisions-built-and-deferred.md)).
@@ -249,5 +421,5 @@ stores ([ADR-0049](docs/adr/0049-the-product-database-is-not-a-record.md)).
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Module layout, the dependency graph, request flow, where each invariant is enforced, and how it is deployed |
 | [docs/DOMAIN-MODEL.md](docs/DOMAIN-MODEL.md) | The chart of accounts, the payment lifecycle, matching stages and reason codes, and the exception lifecycle |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Measured throughput for parsing, ledger writes and batch matching — including where subset-sum stops finding answers |
-| [docs/adr/](docs/adr/README.md) | 62 decision records, each with its context, decision and consequences |
+| [docs/adr/](docs/adr/README.md) | 75 decision records, each with its context, decision and consequences |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Engineering rules for changing this codebase |

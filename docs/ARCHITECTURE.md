@@ -29,8 +29,8 @@ than one runnable. The ledger does not know it is being served over HTTP.
 
 | App | What it is |
 |---|---|
-| `apps/api` | The Fastify service. Binds a port, receives webhooks, accepts evidence uploads, exposes balances, summaries and the exception queue, and drains the inbox in the background. |
-| `apps/pipeline` | A CLI over the same libraries: `migrate`, `demo`, `simulate`, `balances`, `verify`, `replay`, `ingest-settlement`, `ingest-bank`, `reconcile`, `exceptions`, `evidence-retention`. |
+| `apps/api` | The Fastify service. Binds a port, receives webhooks, accepts evidence uploads, exposes balances, summaries, reserves and the exception queue, drains the inbox in the background, and — when `RECON_RECONCILE_INTERVAL_MS` is set — reconciles on a schedule. |
+| `apps/pipeline` | A CLI over the same libraries: `migrate`, `demo`, `simulate`, `balances`, `verify`, `replay`, `ingest-settlement`, `ingest-bank`, `reconcile`, `exceptions`, `reserves`, `attest-bank`, `evidence-retention`. |
 
 The two deployables share every package. The CLI covers what a service is the wrong tool
 for: a scheduled `replay`, a scheduled `evidence-retention`, a one-off ingest of a local
@@ -84,6 +84,23 @@ Three inbound rails reach the service and stay separate.
 
     POST /reconcile/runs              allocation, then bank confirmation. The only path that
                                       books cash.
+       (or a scheduler, on an         same call, same libraries, no person involved. Off by
+        interval)                     default: see below.
+
+Two loops run beside the router, and the difference between them was the last gap in the
+architecture. The inbox worker always polls, because a provider is on a retry timer. The
+reconcile scheduler is **off unless configured**, because a deployment driving runs from its
+own cron must not have an internal timer racing it — and because nothing else in the system
+surfaces an exception, a deployment that configures neither has quietly stopped reconciling
+while answering 200 to everything. The service warns at boot, and `/health` reports
+`reconciliation_stale` ([ADR-0074](adr/0074-the-last-mile-is-a-schedule-and-a-verdict.md)).
+
+`/health` is the other half of that. It compares the numbers it reports against thresholds and
+answers **503** once one is breached, with a sentence per breach — a stalled worker, a delivery
+nobody will retry, a queue nobody is working, a reconciliation that has not run since Tuesday,
+or a week without a human comparing the books to the bank. A status code is the one signal
+every monitor already understands, which is what makes it the last mile rather than another
+number for nobody to read.
 
 The webhook rail is asynchronous because a remote system is on a retry timer and the only
 answer that can honestly be given in milliseconds is that the event was received. The upload
@@ -109,6 +126,12 @@ Most of them are not in TypeScript.
 | Evidence is never stored in the clear | `recordEvidence` takes a key ring and there is no unencrypted column to write to; the ciphertext is bound to the evidence id, so it cannot be moved between rows |
 | A purge really purged | a `CHECK` constraint that a blob marked purged holds no ciphertext |
 | Every read of a document is attributable | an append-only `evidence_access` table naming the verified principal, and a `reason` the database requires for anything that hands over bytes |
+| Two bank credits cannot share one identity | the parser refuses a repeated id inside a file; `recordBankLines` reads every conflicting row and refuses one that disagrees, queueing it as `BANK_LINE_COLLISION` rather than absorbing it as a redelivery ([ADR-0068](adr/0068-the-bank-file-is-the-trust-boundary.md)) |
+| A bank date is never guessed | ISO-8601 only, refused otherwise and reported as drift on the column, because `new Date()` accepts DD/MM as MM/DD and answers a month away |
+| An exception is closed only by something that looked at it | `clearVanished` clears within the window the run actually loaded, and never an `acknowledged` item ([ADR-0075](adr/0075-clearing-is-bounded-by-what-the-run-saw.md)) |
+| A withheld reserve has a deadline | the hold is written in the same transaction as the booking that withheld it, so a `psp_reserve` entry with no dated obligation behind it cannot exist ([ADR-0071](adr/0071-reserves-carry-a-deadline.md)) |
+| Concurrent bookings cannot deadlock on the balance cache | `postTransaction` sorts its per-account upserts, so every writer takes the same locks in the same order ([ADR-0073](adr/0073-retries-back-off-and-secrets-overlap.md)) |
+| A transient failure cannot exhaust a delivery's retries | `next_attempt_at` and an exponential backoff whose jitter is derived from the delivery id, so two workers compute the same delay |
 
 Two further invariants live in the database because application code cannot be trusted with
 them: a payment can never be allocated beyond its receivable (a deferred trigger), and one
@@ -131,6 +154,23 @@ resolve from `packages/` rather than from the registry.
 The service applies migrations at startup while holding an advisory lock, so a fresh machine
 needs one command and concurrent replicas cannot race
 ([ADR-0056](adr/0056-migrations-run-on-boot-under-a-lock.md)).
+
+Three things the image does not do for itself, and a deployment must:
+
+**Drive reconciliation.** `RECON_RECONCILE_INTERVAL_MS`, or an external cron on
+`POST /reconcile/runs` — one or the other, and on one replica.
+
+**Put a rate limit in front.** The built-in limiter is per-process and in-memory, so it is a
+floor rather than a control: two replicas allow twice the rate and a rotating source address
+defeats it. A WAF or gateway limit on `/webhooks/:source` is the real one, and
+`RECON_TRUST_PROXY=true` is what lets the in-process limiter see real client addresses behind
+it.
+
+**Compare the books to the bank.** Cash is booked from an uploaded file and nothing proves its
+provenance; `verify` proves internal conservation and a fabricated statement that balances is
+internally conserved. `POST /bank/attestations` records a human doing it, and
+`RECON_ALERT_ATTESTATION_AGE_MS` is what notices when nobody has
+([ADR-0068](adr/0068-the-bank-file-is-the-trust-boundary.md)).
 
 ## Related documents
 

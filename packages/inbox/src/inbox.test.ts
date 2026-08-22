@@ -14,6 +14,7 @@ import {
   inboxDepth,
   inboxOriginals,
   redactInboxOriginals,
+  retryAfter,
   INBOX_MIGRATIONS_DIR,
   type DeliveryHandler,
   type Redactor,
@@ -198,7 +199,15 @@ describe('the webhook inbox', { skip: DATABASE_URL ? false : 'set DATABASE_URL t
     assert.equal(first.retrying, 1);
     assert.equal((await deliveryAt(pool, accepted.deliveryId))?.attempts, 1);
 
-    const second = await drain(pool, throwing, { at: AT, limit: 1, maxAttempts: 2 });
+    // …and it must not burn the next attempt in the same second. A pass at the same instant
+    // finds nothing claimable, which is the whole of the backoff: a transient failure gets
+    // time to stop being one instead of consuming eight attempts in four seconds.
+    const immediately = await drain(pool, throwing, { at: AT, limit: 1, maxAttempts: 2 });
+    assert.equal(immediately.claimed, 0);
+    assert.equal(immediately.deferred, 1);
+
+    const later = new Date(AT.getTime() + 60_000);
+    const second = await drain(pool, throwing, { at: later, limit: 1, maxAttempts: 2 });
     assert.equal(second.failed, 1);
 
     const stored = await deliveryAt(pool, accepted.deliveryId);
@@ -206,8 +215,29 @@ describe('the webhook inbox', { skip: DATABASE_URL ? false : 'set DATABASE_URL t
     assert.match(stored?.lastError ?? '', /ledger is unreachable/);
 
     // Failed means nobody tries again without a person, and the bytes are still here.
-    assert.equal((await drain(pool, throwing, { at: AT, limit: 5, maxAttempts: 2 })).claimed, 0);
+    assert.equal((await drain(pool, throwing, { at: later, limit: 5, maxAttempts: 2 })).claimed, 0);
     assert.equal((await inboxDepth(pool)).failed >= 1, true);
+  });
+
+  test('the retry delay grows, and two workers compute the same one', async () => {
+    // Deterministic, and derived from the delivery id rather than a random source. Two
+    // workers must agree about when a row becomes claimable again, or a redrained queue is
+    // not reproducible — which is this package's whole claim.
+    const id = 'a'.repeat(62) + '80';
+    assert.equal(retryAfter(1, id), retryAfter(1, id));
+    assert.ok(retryAfter(2, id) > retryAfter(1, id));
+    assert.ok(retryAfter(3, id) > retryAfter(2, id));
+
+    // Capped, so a delivery that has failed twenty times is not scheduled for next week.
+    assert.ok(retryAfter(20, id) <= 300_000 * 1.125);
+
+    // Jittered, so a thousand deliveries that failed together do not return together.
+    assert.notEqual(retryAfter(4, 'b'.repeat(62) + '00'), retryAfter(4, 'b'.repeat(62) + 'ff'));
+
+    // Eight attempts must span minutes, not the four seconds a fixed interval gave them.
+    let total = 0;
+    for (let attempt = 1; attempt <= 8; attempt += 1) total += retryAfter(attempt, id);
+    assert.ok(total > 4 * 60_000, `eight attempts spanned only ${total}ms`);
   });
 
   test('a delivery that throws once is worked on the next pass', async () => {
@@ -227,7 +257,9 @@ describe('the webhook inbox', { skip: DATABASE_URL ? false : 'set DATABASE_URL t
     };
 
     await drain(pool, flaky, { at: AT, limit: 1, maxAttempts: 5 });
-    await drain(pool, flaky, { at: AT, limit: 1, maxAttempts: 5 });
+    // The next pass, a minute later. Same instant would find it still backing off — see the
+    // test above; here the point is that the recovery happens on its own, with no person.
+    await drain(pool, flaky, { at: new Date(AT.getTime() + 60_000), limit: 1, maxAttempts: 5 });
 
     const stored = await deliveryAt(pool, accepted.deliveryId);
     assert.equal(stored?.state, 'processed');

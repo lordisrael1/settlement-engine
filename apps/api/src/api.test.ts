@@ -9,7 +9,7 @@ import { deliveryAt, drain, INBOX_MIGRATIONS_DIR } from '@recon/inbox';
 import { createPool, LEDGER_MIGRATIONS_DIR, runMigrations } from '@recon/ledger-core';
 import { DEFAULT_RETENTION } from '@recon/canon';
 import { localKeyRing, openWithKey, parseLocalKey } from '@recon/protect';
-import { RECONCILER_MIGRATIONS_DIR } from '@recon/reconciler';
+import { DEFAULT_SUBSET_LIMITS, RECONCILER_MIGRATIONS_DIR } from '@recon/reconciler';
 
 import { buildApp } from './app.js';
 import type { Config } from './config.js';
@@ -66,11 +66,38 @@ const CONFIG: Config = {
   bank: 'gtbank',
   // Two of the four, so that "we have an adapter but no secret" is a state the suite can
   // actually reach — it is a 503, and it is the one webhook failure that is our fault.
-  webhookSecret: (source) =>
-    ({ paystack: PAYSTACK_SECRET, flutterwave: FLUTTERWAVE_SECRET })[source] ?? null,
+  webhookSecrets: (source: string) => {
+    const held: Record<string, readonly string[]> = {
+      paystack: [PAYSTACK_SECRET],
+      flutterwave: [FLUTTERWAVE_SECRET],
+    };
+    return held[source] ?? [];
+  },
   drain: { intervalMs: 1000, batch: 50, maxAttempts: 3 },
   limits: { webhookBytes: 256 * 1024, uploadBytes: 8 * 1024 * 1024 },
   reconcileLimit: 500,
+  // Off. The suite makes hundreds of requests from one address in a few seconds, which is
+  // exactly the shape a limiter exists to refuse — and `ratelimit.test.ts` proves the
+  // limiter separately, against its own clock, rather than by making this suite slow.
+  rateLimits: {
+    webhook: { perWindow: 0, windowMs: 60_000, maxKeys: 0 },
+    management: { perWindow: 0, windowMs: 60_000, maxKeys: 0 },
+  },
+  // Every threshold off. This suite deliberately creates the states the alerts exist to
+  // report — a delivery that exhausts its retries, a queue with exceptions in it — so leaving
+  // them on would make `/health` return 503 for reasons the suite itself arranged, and every
+  // other test's meaning would depend on the order they ran in. `alerts.test.ts` proves the
+  // verdicts directly, against states it constructs on purpose.
+  alerts: {
+    inboxPending: 0,
+    inboxFailed: 0,
+    inboxAgeMs: 0,
+    openExceptions: 0,
+    reconcileAgeMs: 0,
+    attestationAgeMs: 0,
+  },
+  reconcileIntervalMs: 0,
+  subsetLimits: DEFAULT_SUBSET_LIMITS,
 };
 
 /**
@@ -890,5 +917,102 @@ describe('the service', { skip: DATABASE_URL ? false : 'set DATABASE_URL to run'
 
     const again = await app.inject({ method: 'GET', url: issued.url });
     assert.equal(again.statusCode, 410);
+  });
+  // ── The trust boundary ────────────────────────────────────────────────────
+
+  /**
+   * The control this architecture cannot perform for itself, made into a record.
+   *
+   * Cash is booked from an uploaded file and nothing proves that file came from the bank.
+   * `verify` cannot catch a fabrication — it proves internal conservation, and a fabricated
+   * statement that balances is internally conserved — so the honest control is a person
+   * comparing against the bank's own portal, and the only thing code can do about it is make
+   * that a record with a name and a date on it (ADR-0068).
+   */
+  test('a bank attestation records the person, the two numbers and the difference', async () => {
+    const before = await app.inject({
+      method: 'GET',
+      url: '/bank/position',
+      headers: authed(),
+    });
+    assert.equal(before.statusCode, 200);
+    const position = before.json() as {
+      ledgerBalance: { kobo: string };
+      lastAttestation: unknown;
+    };
+
+    const recorded = await app.inject({
+      method: 'POST',
+      url: '/bank/attestations',
+      headers: { ...authed(), 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        portalBalanceKobo: '999900',
+        note: 'GTBank corporate portal, 09:05',
+      }),
+    });
+
+    assert.equal(recorded.statusCode, 201);
+    const body = recorded.json() as {
+      portalBalance: { kobo: string };
+      ledgerBalance: { kobo: string };
+      difference: { kobo: string };
+      attestedBy: string;
+    };
+
+    // The ledger side is recomputed from entries here, never taken from the caller: an
+    // attestation against a number the caller supplied would assert nothing at all.
+    assert.equal(body.ledgerBalance.kobo, position.ledgerBalance.kobo);
+    assert.equal(body.portalBalance.kobo, '999900');
+    assert.equal(
+      BigInt(body.difference.kobo),
+      BigInt(body.portalBalance.kobo) - BigInt(body.ledgerBalance.kobo),
+    );
+    // The authenticated principal, not a name the body offered about itself.
+    assert.equal(body.attestedBy, 'amaka@example.com');
+
+    const after = await app.inject({
+      method: 'GET',
+      url: '/bank/position',
+      headers: authed(),
+    });
+    const latest = after.json() as { lastAttestation: { attestedBy: string } | null };
+    assert.equal(latest.lastAttestation?.attestedBy, 'amaka@example.com');
+  });
+
+  test('an attestation needs a key, and an integer as a string', async () => {
+    const anonymous = await app.inject({
+      method: 'POST',
+      url: '/bank/attestations',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ portalBalanceKobo: '100' }),
+    });
+    assert.equal(anonymous.statusCode, 401);
+
+    // A JSON number is a double and a double is not a ledger amount, so the schema takes a
+    // decimal string and refuses anything else — including the number that looks right.
+    const asNumber = await app.inject({
+      method: 'POST',
+      url: '/bank/attestations',
+      headers: { ...authed(), 'content-type': 'application/json' },
+      payload: JSON.stringify({ portalBalanceKobo: 100 }),
+    });
+    assert.equal(asNumber.statusCode, 400);
+  });
+
+  test('the reserves endpoint answers, and says which are overdue', async () => {
+    const response = await app.inject({ method: 'GET', url: '/reserves', headers: authed() });
+
+    assert.equal(response.statusCode, 200);
+    const body = response.json() as {
+      reserves: { inflowKey: string; outstanding: { kobo: string }; overdue: boolean }[];
+    };
+    assert.ok(Array.isArray(body.reserves));
+    // Nothing is asserted about the contents: what this suite is proving is the contract,
+    // and whether a particular reserve is overdue is proved against a real clock and a real
+    // withholding in `packages/reconciler/src/exceptions.test.ts`.
+    for (const reserve of body.reserves) {
+      assert.equal(typeof reserve.overdue, 'boolean');
+      assert.match(reserve.outstanding.kobo, /^-?\d+$/);
+    }
   });
 });

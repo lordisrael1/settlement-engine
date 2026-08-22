@@ -151,10 +151,24 @@ export const EXCEPTION_SEVERITY: Readonly<Partial<Record<ReasonCode, number>>> =
   DUPLICATE_BANK_CREDIT: 3,
   /** Cash we booked and then lost again. The books said we had it. */
   RETURNED_PAYOUT: 3,
+  /**
+   * Two statement rows wearing one identity. Ranked with the cash-in-hand findings because
+   * that is what it is: a credit that was about to be discarded as a redelivery, which
+   * means real money in the account that the books would never have seen (ADR-0068).
+   */
+  BANK_LINE_COLLISION: 3,
   /** Two records about one event that certainly disagree. */
   AMOUNT_MISMATCH: 2,
   /** The PSP's own file does not add up. */
   PAYOUT_UNBALANCED: 2,
+  /**
+   * A payout too large for the bounded search. Ranked above lateness because nothing else
+   * will ever resolve it: unlike a straggler, no later evidence makes this clear itself —
+   * either the batch shrinks, the bound is raised, or a human matches it by hand.
+   */
+  BATCH_TOO_LARGE: 2,
+  /** Our money, held past the date it was due back. Late, and nobody is chasing it. */
+  RESERVE_UNRELEASED: 2,
   /** Money we are owed and have not received. Usually late; occasionally gone. */
   MISSING_SETTLEMENT: 1,
 };

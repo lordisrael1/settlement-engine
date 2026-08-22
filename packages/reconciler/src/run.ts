@@ -1,14 +1,15 @@
 import type {
-  ExceptionSubject,
   LedgerTransaction,
   MatchResult,
   Money,
   TransactionId,
 } from '@recon/canon';
+import { sum, ZERO } from '@recon/canon';
 import type { Executor } from '@recon/ledger-core';
 import {
   bookBankConfirmedSettlement,
   bookChargeback,
+  bookReserveRelease,
   bookReturnedPayout,
   bookReversal,
   getTransaction,
@@ -21,6 +22,7 @@ import {
   clearVanished,
   draftFrom,
   raiseExceptions,
+  type ClearScope,
   type ExceptionDraft,
 } from './exceptions.js';
 import {
@@ -33,6 +35,7 @@ import {
   type ReturnedPayout,
 } from './match.js';
 import type { PolicyLookup } from './policy.js';
+import { recordReserveMovement, unreleasedReserves } from './reserves.js';
 import {
   allocatedByTransaction,
   allocationsOf,
@@ -96,13 +99,42 @@ export interface ReconciliationRun {
   /** Every conclusion, from both stages, for reporting. */
   readonly deferred: readonly MatchResult[];
   readonly exceptions: readonly MatchResult[];
-  /** What this run did to the queue: raised, left alone, reopened, cleared. */
+  /** What this run did to the queue: raised, left alone, reopened, cleared, withheld. */
   readonly queue: {
     readonly raised: number;
     readonly unchanged: number;
     readonly reopened: number;
     readonly cleared: number;
+    /**
+     * Not found this run, and deliberately left open anyway: outside the run's window, or
+     * acknowledged by a human. See `clearVanished`.
+     *
+     * The number to watch. Zero is the healthy state; a figure that persists across runs
+     * says the queue's subjects no longer fit inside `limit`, and the auto-clearing this
+     * whole phase exists for has quietly stopped working.
+     */
+    readonly withheld: number;
   };
+  /**
+   * How much of each record this run actually read, and whether it reached the end.
+   *
+   * Reported because every bound in here is invisible from the outside: a run that looked
+   * at the first thousand payouts of four thousand produces a report that looks exactly
+   * like a run that looked at all of them. `truncated` anywhere means the conclusions
+   * below are about a sample.
+   */
+  readonly window: {
+    readonly transactions: WindowReport;
+    readonly payouts: WindowReport;
+    readonly settlementLines: WindowReport;
+    readonly bankLines: WindowReport;
+  };
+}
+
+/** How many records of one kind a run loaded, and whether that was all of them. */
+export interface WindowReport {
+  readonly loaded: number;
+  readonly truncated: boolean;
 }
 
 export async function reconcile(
@@ -114,14 +146,22 @@ export async function reconcile(
   const failures: BookingFailure[] = [];
 
   // ── Stage two ─────────────────────────────────────────────────────────────
+  //
+  // Every loader below is bounded, and every one of them is held rather than inlined,
+  // because what the run *saw* is as much a part of its output as what it concluded. The
+  // queue's auto-clearing depends on the difference between "no longer a problem" and
+  // "beyond the thousandth row", and that difference is only knowable here.
   const allocated = await allocatedByTransaction(db);
-  const transactions = await loadCandidates(db, limit);
+  const loaded = await loadCandidates(db, limit);
+  const transactions = loaded.transactions;
+  const payouts = await unallocatedPayouts(db, limit);
+  const lines = await unallocatedSettlementLines(db, limit);
 
   const allocation = allocate({
     transactions,
     allocated,
-    payouts: await unallocatedPayouts(db, limit),
-    lines: await unallocatedSettlementLines(db, limit),
+    payouts,
+    lines,
     policyFor: input.policyFor,
     asOf: input.asOf,
     ...(input.limits ? { limits: input.limits } : {}),
@@ -133,8 +173,10 @@ export async function reconcile(
 
   for (const prepared of allocation.prepared) {
     // A reversal or a clawback is not an expected inflow: no money is coming, so there is
-    // nothing for a bank statement to confirm and nothing to gain by waiting.
-    if (prepared.result.reason === 'REVERSAL' || prepared.result.reason === 'CHARGEBACK') {
+    // nothing for a bank statement to confirm and nothing to gain by waiting. Partial ones
+    // included — a ₦3,000 refund against a ₦10,000 charge books ₦3,000 back and leaves the
+    // rest waiting for its payout (ADR-0069).
+    if (BOOKS_IMMEDIATELY.has(prepared.result.reason)) {
       await bookImmediately(db, prepared, receivables, input.asOf, booked, failures);
       continue;
     }
@@ -144,12 +186,16 @@ export async function reconcile(
   }
 
   // ── Stage three ───────────────────────────────────────────────────────────
+  const open = await openInflows(db, limit);
+  // Already banked. Not candidates — the evidence that lets a second credit for the same
+  // payout, and a debit taking one back, be recognised as what they are.
+  const banked = await confirmedInflows(db, limit);
+  const bankLines = await unmatchedBankLines(db, limit);
+
   const confirmation = confirm({
-    inflows: await openInflows(db, limit),
-    // Already banked. Not candidates — the evidence that lets a second credit for the same
-    // payout, and a debit taking one back, be recognised as what they are.
-    confirmedInflows: await confirmedInflows(db, limit),
-    bankLines: await unmatchedBankLines(db, limit),
+    inflows: open,
+    confirmedInflows: banked,
+    bankLines,
     policyFor: input.policyFor,
     asOf: input.asOf,
   });
@@ -164,19 +210,28 @@ export async function reconcile(
 
     try {
       const outcome = await inTransaction(db, async (client) => {
-        const posted = await bookBankConfirmedSettlement(
-          client,
-          {
-            creditKey: settled.credit.idempotencyKey,
-            source: settled.inflow.source,
-            reference: settled.inflow.key,
-            valueDate: settled.credit.valueDate,
-            recordedAt: input.asOf,
-            credited: settled.credit.amount,
-          },
-          discharged,
-          settled.deductions,
-        );
+        const confirmation = {
+          creditKey: settled.credit.idempotencyKey,
+          source: settled.inflow.source,
+          reference: settled.inflow.key,
+          valueDate: settled.credit.valueDate,
+          recordedAt: input.asOf,
+          credited: settled.credit.amount,
+        };
+
+        // A movement discharging no receivable is a reserve coming back, not a settlement,
+        // and it books differently: an asset we already held changes which account it sits
+        // in. `bookBankConfirmedSettlement` refuses an empty discharge list — correctly,
+        // because money with nothing to discharge is otherwise a phantom credit (ADR-0071).
+        const posted =
+          discharged.length === 0
+            ? await bookReserveRelease(client, confirmation, settled.deductions)
+            : await bookBankConfirmedSettlement(
+                client,
+                confirmation,
+                discharged,
+                settled.deductions,
+              );
 
         if (posted.outcome === 'posted') {
           await confirmInflow(
@@ -192,6 +247,28 @@ export async function reconcile(
             posted.transactionId,
             input.asOf,
           );
+
+          // The reserve position, in the same transaction as the booking that moved it.
+          // Separately would allow a `psp_reserve` entry with no hold behind it — a balance
+          // that grows with nothing recording when any of it is due back, which is the exact
+          // state this tracking exists to make impossible (ADR-0071).
+          //
+          // The clock starts at the credit's value date, not the run's `asOf`: a reserve's
+          // ninety days run from when the money was actually held back, and dating it to the
+          // run would restart every reserve's clock whenever somebody re-imported a file.
+          const reserve = settled.deductions
+            .filter((deduction) => deduction.accountId === 'psp_reserve')
+            .reduce<Money>((total, deduction) => sum([total, deduction.amount]), ZERO);
+
+          await recordReserveMovement(client, {
+            inflowKey: settled.inflow.key,
+            source: settled.inflow.source,
+            net: reserve,
+            at: settled.credit.valueDate,
+            confirmedBy: settled.credit.idempotencyKey,
+            evidenceId: settled.inflow.evidenceId,
+            policyFor: input.policyFor,
+          });
         }
         return posted.outcome;
       });
@@ -234,8 +311,23 @@ export async function reconcile(
     .map((result) => draftFrom(result, amountOf(result, allocation, confirmation)))
     .filter((draft): draft is ExceptionDraft => draft !== null);
 
+  // Reserves past the date the source undertook to return them.
+  //
+  // The only finding in a run that comes from the *books* rather than from comparing two
+  // records — because that is what it is about: money nobody disputes we are owed, that
+  // nobody has sent back, and that no third record will ever mention. It joins the matcher's
+  // drafts here so it raises, deduplicates and clears through exactly the same machinery,
+  // including clearing itself the moment a `reserve_release` finally arrives (ADR-0071).
+  const overdueReserves = await unreleasedReserves(db, input.asOf, limit);
+  drafts.push(...overdueReserves);
+
   const raised = await raiseExceptions(db, drafts, input.asOf);
-  const cleared = await clearVanished(db, drafts, SUBJECTS_THIS_RUN_JUDGED, input.asOf);
+  const cleared = await clearVanished(
+    db,
+    drafts,
+    scopeOf(loaded, payouts, lines, open, banked, bankLines, overdueReserves, limit),
+    input.asOf,
+  );
 
   // A promise past its window and its grace is not merely unmatched — it is a question the
   // ledger itself should be able to answer. `exception` is deliberately non-terminal: a
@@ -270,24 +362,88 @@ export async function reconcile(
     failures,
     deferred: [...allocation.deferred, ...confirmation.deferred],
     exceptions,
-    queue: { ...raised, cleared },
+    queue: { ...raised, ...cleared },
+    window: {
+      transactions: { loaded: transactions.length, truncated: loaded.truncated },
+      payouts: { loaded: payouts.length, truncated: payouts.length >= limit },
+      settlementLines: { loaded: lines.length, truncated: lines.length >= limit },
+      bankLines: { loaded: bankLines.length, truncated: bankLines.length >= limit },
+    },
   };
 }
 
 /**
- * Which kinds of subject this run was in a position to judge.
+ * What this run was in a position to judge, per subject kind.
  *
- * Every run reads all three records, so every run can speak to all four subjects — and
- * anything it does not find again really has gone away. A future partial run (one source
- * only, say) must narrow this, because treating silence as "resolved" would close problems
- * that are still entirely real.
+ * Every run reads all three records, so every run can speak to all four subjects — but
+ * *speaking to a subject kind* and *having seen a particular subject* are different claims,
+ * and the queue's auto-clearing needs the second one. So each kind carries the ids the run
+ * actually loaded, and whether the loaders reached the end.
+ *
+ * Note where the ids for `payout` come from: three loaders, not one. A payout-subject
+ * exception can be about a payout waiting to be allocated, an inflow waiting on the bank,
+ * or one already banked and since returned — and an exception whose subject was only ever
+ * visible through the loader we forgot would never clear itself.
+ *
+ * A future partial run — one source only, say, or bank statements alone — narrows this by
+ * omitting the kinds it did not read. Treating its silence as "resolved" would close
+ * problems that are still entirely real.
  */
-const SUBJECTS_THIS_RUN_JUDGED: readonly ExceptionSubject[] = [
-  'payout',
-  'bank_credit',
-  'transaction',
-  'settlement_line',
-];
+function scopeOf(
+  loaded: LoadedCandidates,
+  payouts: readonly { payoutReference: string }[],
+  lines: readonly { idempotencyKey: string }[],
+  open: readonly { key: string }[],
+  banked: readonly { key: string }[],
+  bankLines: readonly { idempotencyKey: string }[],
+  reserves: readonly ExceptionDraft[],
+  limit: number,
+): ClearScope {
+  return {
+    transaction: {
+      witnessed: new Set(loaded.transactions.map((t) => t.transactionId)),
+      truncated: loaded.truncated,
+    },
+    payout: {
+      witnessed: new Set([
+        ...payouts.map((p) => p.payoutReference),
+        ...open.map((i) => i.key),
+        ...banked.map((i) => i.key),
+        // Reserve findings are keyed by the inflow they were withheld from, and that inflow
+        // is long since confirmed — so without this a `RESERVE_UNRELEASED` could be raised
+        // and then never cleared when the release finally arrived.
+        ...reserves.map((draft) => draft.subjectId),
+      ]),
+      truncated:
+        payouts.length >= limit ||
+        open.length >= limit ||
+        banked.length >= limit ||
+        reserves.length >= limit,
+    },
+    settlement_line: {
+      witnessed: new Set(lines.map((l) => l.idempotencyKey)),
+      truncated: lines.length >= limit,
+    },
+    bank_credit: {
+      witnessed: new Set(bankLines.map((l) => l.idempotencyKey)),
+      truncated: bankLines.length >= limit,
+    },
+  };
+}
+
+/**
+ * The conclusions that book on the spot rather than waiting for a bank credit.
+ *
+ * Refunds and clawbacks, whole and partial. A partial refund left out of this set would be
+ * recorded as an expected inflow and would wait forever for a credit that is never coming,
+ * then escalate as a `MISSING_SETTLEMENT` for money nobody is sending.
+ */
+const BOOKS_IMMEDIATELY: ReadonlySet<MatchResult['reason']> = new Set([
+  'REVERSAL',
+  'PARTIAL_REVERSAL',
+  'CHARGEBACK',
+  'PARTIAL_CHARGEBACK',
+]);
 
 /**
  * What the difference is worth, dug out of whichever stage produced it.
@@ -411,14 +567,19 @@ async function bookImmediately(
 
   try {
     const outcome = await inTransaction(db, async (client) => {
-      const posted =
-        prepared.result.reason === 'REVERSAL'
-          ? await bookReversal(client, event, {
-              transactionId: allocation.transactionId,
-              receivable: receivables.get(allocation.transactionId) ?? allocation.amount,
-              amount: allocation.amount,
-            })
-          : await bookChargeback(client, event, allocation.amount);
+      const refund =
+        prepared.result.reason === 'REVERSAL' || prepared.result.reason === 'PARTIAL_REVERSAL';
+
+      const posted = refund
+        ? await bookReversal(client, event, {
+            transactionId: allocation.transactionId,
+            // The receivable the promise opened at, not the amount coming back. The two
+            // differ for a partial refund, and the booking uses the difference to decide
+            // whether the promise's story has ended.
+            receivable: receivables.get(allocation.transactionId) ?? allocation.amount,
+            amount: allocation.amount,
+          })
+        : await bookChargeback(client, event, allocation.amount);
 
       if (posted.outcome === 'posted') {
         await recordMatch(client, matchId, prepared.result, posted.transactionId, asOf);
@@ -444,11 +605,26 @@ async function bookImmediately(
  * `settled` transactions come too, because a chargeback can only apply to money that
  * already landed, and it needs to find the payment it is clawing back.
  */
-async function loadCandidates(db: Executor, limit: number): Promise<LedgerTransaction[]> {
+interface LoadedCandidates {
+  readonly transactions: LedgerTransaction[];
+  /**
+   * Whether any of the three state queries came back full.
+   *
+   * Reported rather than inferred from the total, because the filtering below drops
+   * non-promises: a run can hold four hundred promises out of a thousand rows read and
+   * still have seen only the first thousand transactions in that state.
+   */
+  readonly truncated: boolean;
+}
+
+async function loadCandidates(db: Executor, limit: number): Promise<LoadedCandidates> {
   const byId = new Map<string, LedgerTransaction>();
+  let truncated = false;
 
   for (const state of ['authorized', 'exception', 'settled'] as const) {
-    for (const transaction of await listByState(db, state, limit)) {
+    const batch = await listByState(db, state, limit);
+    if (batch.length >= limit) truncated = true;
+    for (const transaction of batch) {
       // Only promises: settlement bookings and reversals credit the receivable rather than
       // debiting it, so `receivableOf` excludes them without anybody having to remember.
       if (receivableOf(transaction).kobo <= 0n) continue;
@@ -456,6 +632,6 @@ async function loadCandidates(db: Executor, limit: number): Promise<LedgerTransa
     }
   }
 
-  return [...byId.values()];
+  return { transactions: [...byId.values()], truncated };
 }
 

@@ -79,6 +79,28 @@ export function printReconciliation(run: ReconciliationRun): void {
       `${run.queue.cleared} cleared by evidence`,
   );
 
+  // Printed only when it is not zero, and printed loudly when it is not. An item this run
+  // did not find and deliberately left open is either somebody's acknowledged work — fine —
+  // or a subject that fell outside the bound, which means the queue has stopped clearing
+  // itself and nothing else on this screen would say so.
+  if (run.queue.withheld > 0) {
+    console.log(
+      `  \x1b[33m${String(run.queue.withheld).padStart(3)} not found and left open\x1b[0m` +
+        `                (acknowledged by a person, or outside this run's window)`,
+    );
+  }
+
+  // The bound, stated. A run over a sample and a run over everything produce reports that
+  // are otherwise identical, and only one of them is a reconciliation.
+  const truncated = Object.entries(run.window).filter(([, w]) => w.truncated);
+  if (truncated.length > 0) {
+    console.log(
+      `  \x1b[33m! this run read a sample, not the books\x1b[0m: ` +
+        truncated.map(([what, w]) => `${what} stopped at ${w.loaded}`).join(', ') +
+        `\n    Raise --limit (or RECON_RECONCILE_LIMIT) until nothing here is truncated.`,
+    );
+  }
+
   for (const failure of run.failures) {
     console.log(`\n  ✗ ${failure.matchId} (${failure.reason})`);
     console.log(`    ${failure.error.split('\n')[0]}`);

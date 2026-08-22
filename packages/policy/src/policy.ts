@@ -15,8 +15,11 @@ import { loadFeeContracts, type PolicyLookup, type SourcePolicy } from '@recon/r
 export async function buildPolicy(
   db: Executor,
   merchantId: MerchantId,
+  options: { readonly reserveReleaseDays?: number | null } = {},
 ): Promise<PolicyLookup> {
   const policies = new Map<string, SourcePolicy>();
+  const reserveDays =
+    options.reserveReleaseDays === undefined ? 90 : options.reserveReleaseDays;
 
   for (const source of SOURCE_IDS) {
     const profile = sourceProfile(source);
@@ -32,6 +35,16 @@ export async function buildPolicy(
       // announced. ₦100 is the threshold below which chasing one costs more than it is
       // worth; above it, somebody looks.
       bankChargeAllowance: 10_000n,
+      // Enabled for sources we hold a profile for. The alternative — refusing every
+      // same-amount pair — makes queue depth scale with transaction volume for any
+      // fixed-price business, which is the way reconciliation tools die in practice: not
+      // wrong, just unread by Thursday (ADR-0072).
+      pairEqualAmounts: true,
+      // Ninety days is the common Nigerian rolling-reserve term. A number somebody chose,
+      // and the only thing that makes a reserve position falsifiable: without it, a PSP that
+      // returns reserves on schedule and one that never returns them produce identical books
+      // (ADR-0071).
+      reserveReleaseDays: reserveDays,
     });
   }
 

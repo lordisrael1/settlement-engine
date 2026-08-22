@@ -36,6 +36,15 @@ export const REASON_CODES = [
   'PARTIAL_SETTLEMENT',
   /** Short by a rolling reserve or dispute hold the PSP declared. Still ours. */
   'RESERVE_WITHHELD',
+  /**
+   * A reserve coming back: a movement that discharges no receivable at all.
+   *
+   * The one payout shape with a gross of zero. It covers no payments — there is nothing to
+   * match it to — and the money is ours already, sitting in `psp_reserve`. Without this it
+   * looked like a `PHANTOM_CREDIT`: a payout naming no promises, which is exactly what it is
+   * and exactly the wrong thing to call it (ADR-0071).
+   */
+  'RESERVE_RELEASED',
   /** Short by tax deducted at source. */
   'TAX_WITHHELD',
   /** Short by a penalty the PSP declared. */
@@ -44,8 +53,19 @@ export const REASON_CODES = [
   'BANK_CHARGE',
   /** The promise was undone before settlement. */
   'REVERSAL',
+  /**
+   * Part of the promise was undone before settlement, and the rest is still coming.
+   *
+   * A ₦3,000 refund against a ₦10,000 charge — one line of a basket cancelled — is the
+   * ordinary shape of e-commerce, and the whole-transaction `REVERSAL` cannot express it:
+   * negating the lot would erase ₦7,000 of receivable the PSP still owes us, and refusing
+   * the line would escalate a refund that is going exactly to plan (ADR-0069).
+   */
+  'PARTIAL_REVERSAL',
   /** Money clawed back after settlement. */
   'CHARGEBACK',
+  /** Part of a settled payment clawed back after settlement. The rest stands. */
+  'PARTIAL_CHARGEBACK',
   /** Not settled yet, but still inside the source's settlement window. Not an error. */
   'PENDING_T_PLUS_N',
   /** Sub-unit difference from currency conversion. */
@@ -70,6 +90,35 @@ export const REASON_CODES = [
   'UNIDENTIFIED_CREDIT',
   /** The PSP's own report does not add up: declared net is not gross less its deductions. */
   'PAYOUT_UNBALANCED',
+  /**
+   * The payout batches more promises than the bounded search may consider, so the
+   * arithmetic was never attempted.
+   *
+   * Deliberately not `PHANTOM_CREDIT`. "No combination of your promises adds up to this
+   * payout" and "we did not look" are different sentences, and filing the second as the
+   * first sends somebody hunting for a missing webhook that is not missing. See
+   * `subset.ts` for the bound and ADR-0070 for why arithmetic-only matching is a
+   * small-batch feature.
+   */
+  'BATCH_TOO_LARGE',
+  /**
+   * Two distinct bank statement rows resolved to one identity.
+   *
+   * The bank id contract (ADR-0068) requires a per-row identifier that is unique within
+   * the account. Where a converter synthesises one — a hash of date, amount and narration
+   * is the obvious and wrong choice — two legitimately distinct credits collide, and the
+   * second is dropped as a redelivery. This is that drop, refused and named: real cash,
+   * about to become invisible.
+   */
+  'BANK_LINE_COLLISION',
+  /**
+   * A reserve the PSP withheld is past the date it undertook to release it.
+   *
+   * `psp_reserve` is an asset: the PSP is holding our money, not keeping it. Without a
+   * deadline attached, a rolling reserve that is never returned looks exactly like one
+   * that has not been returned yet, forever — money quietly not chased (ADR-0071).
+   */
+  'RESERVE_UNRELEASED',
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];
@@ -95,11 +144,14 @@ export const REASON_KIND: Readonly<Record<ReasonCode, ReasonKind>> = {
   AWAITING_BANK_CREDIT: 'explanation',
   PARTIAL_SETTLEMENT: 'explanation',
   RESERVE_WITHHELD: 'explanation',
+  RESERVE_RELEASED: 'explanation',
   TAX_WITHHELD: 'explanation',
   PENALTY: 'explanation',
   BANK_CHARGE: 'explanation',
   REVERSAL: 'explanation',
+  PARTIAL_REVERSAL: 'explanation',
   CHARGEBACK: 'explanation',
+  PARTIAL_CHARGEBACK: 'explanation',
   PENDING_T_PLUS_N: 'explanation',
   FX_ROUNDING: 'explanation',
 
@@ -110,6 +162,9 @@ export const REASON_KIND: Readonly<Record<ReasonCode, ReasonKind>> = {
   RETURNED_PAYOUT: 'exception',
   UNIDENTIFIED_CREDIT: 'exception',
   PAYOUT_UNBALANCED: 'exception',
+  BATCH_TOO_LARGE: 'exception',
+  BANK_LINE_COLLISION: 'exception',
+  RESERVE_UNRELEASED: 'exception',
 };
 
 export function reasonKind(reason: ReasonCode): ReasonKind {
@@ -148,7 +203,16 @@ export type RejectionReason =
   /** It fitted — and so did something else, equally well. Taking either would be a guess. */
   | 'ambiguous'
   /** The reference matched but the lifecycle did not: a clawback against an unsettled promise. */
-  | 'wrong_state';
+  | 'wrong_state'
+  /**
+   * It was never compared, because the search that would have compared it was out of
+   * scope: more candidates than the bounded subset search may hold.
+   *
+   * The distinction from `amount_differs` is the whole reason this exists. "We compared it
+   * and it did not fit" and "we never looked at it" are different facts, and a queue entry
+   * that conflates them sends a human to check arithmetic nobody performed.
+   */
+  | 'not_attempted';
 
 /**
  * Four is a judgement, not a truth. It is enough to show the shape of the near-miss and few

@@ -267,11 +267,64 @@ function recordedAtOf(lines: readonly { settledAt: Date | null }[]): Date {
   return dated.length === 0 ? new Date(0) : new Date(Math.max(...dated.map((at) => at.getTime())));
 }
 
+/**
+ * A statement row that lost to a row already stored under the same id, and disagrees with it.
+ *
+ * Not a duplicate. A duplicate is the same credit ingested twice — the same file uploaded on
+ * Monday and again on Tuesday — and dropping it is exactly right. This is two *different*
+ * credits that a converter's id scheme could not tell apart, and dropping one is money
+ * leaving the books (ADR-0068).
+ */
+export interface BankLineCollision {
+  readonly idempotencyKey: string;
+  /** The line that was about to be discarded. */
+  readonly arriving: BankStatementLine;
+  /** What is already stored under that id, in the fields that make a credit what it is. */
+  readonly stored: {
+    readonly direction: string;
+    readonly amountKobo: string;
+    readonly balanceAfterKobo: string | null;
+    readonly valueDate: Date;
+    readonly narration: string;
+    readonly evidenceId: string;
+  };
+  /** Which fields disagree, so the queue entry says what is different rather than that. */
+  readonly differing: readonly string[];
+}
+
+export interface StoredBankLines extends Stored {
+  /**
+   * Rows refused because a *different* row already holds their id.
+   *
+   * Empty on every healthy ingest, including re-ingesting the same file. A non-empty list
+   * means the converter's identity scheme is not collision-safe, and every entry in it is a
+   * credit that would previously have vanished with no symptom but a later, unexplainable
+   * missing settlement.
+   */
+  readonly collisions: readonly BankLineCollision[];
+}
+
+/**
+ * Store a statement, and refuse to let two credits share one identity.
+ *
+ * `ON CONFLICT DO NOTHING` is the right behaviour for a redelivery and the wrong behaviour
+ * for a collision, and until the conflicting row is *read* the two are indistinguishable —
+ * which is precisely why the failure was silent. So every conflict is looked at: if the
+ * stored row says the same thing, the file has been ingested before and nothing happened;
+ * if it says something else, two different credits are wearing one id and the arriving one
+ * is reported rather than dropped.
+ *
+ * The comparison is over the fields that make a credit what it is — direction, amount,
+ * balance, value date, narration — and deliberately not over `evidence_id` or lineage, which
+ * differ legitimately whenever the same statement is exported twice.
+ */
 export async function recordBankLines(
   db: Executor,
   lines: readonly BankStatementLine[],
-): Promise<Stored> {
+): Promise<StoredBankLines> {
   let stored = 0;
+  const collisions: BankLineCollision[] = [];
+
   await inTransaction(db, async (client) => {
     for (const line of lines) {
       const result = await client.query(
@@ -298,7 +351,14 @@ export async function recordBankLines(
           line.lineage.path,
         ],
       );
-      stored += result.rowCount ?? 0;
+
+      if ((result.rowCount ?? 0) > 0) {
+        stored += 1;
+        continue;
+      }
+
+      const collision = await collisionAt(client, line);
+      if (collision) collisions.push(collision);
     }
 
     const first = lines[0];
@@ -315,7 +375,69 @@ export async function recordBankLines(
       });
     }
   });
-  return { stored, duplicates: lines.length - stored };
+
+  // A collision is not a duplicate, so it is not counted as one. `stored + duplicates +
+  // collisions.length === lines.length`, and a caller adding up the first two and finding a
+  // shortfall is looking at exactly the rows that need a person.
+  return {
+    stored,
+    duplicates: lines.length - stored - collisions.length,
+    collisions,
+  };
+}
+
+/**
+ * What is already stored under this id, when it is not this line.
+ *
+ * `null` for the ordinary case — the same statement ingested twice — which is why this is
+ * safe to call on every conflict: re-ingesting a five-thousand-row file costs five thousand
+ * primary-key lookups and reports nothing.
+ */
+async function collisionAt(
+  db: Executor,
+  line: BankStatementLine,
+): Promise<BankLineCollision | null> {
+  const result = await db.query<{
+    direction: string;
+    amount_kobo: string;
+    balance_after_kobo: string | null;
+    value_date: Date;
+    narration: string;
+    evidence_id: string;
+  }>(
+    `SELECT direction, amount_kobo::text, balance_after_kobo::text, value_date,
+            narration, evidence_id
+       FROM bank_statement_lines WHERE idempotency_key = $1`,
+    [line.idempotencyKey],
+  );
+
+  const row = result.rows[0];
+  if (!row) return null;
+
+  const arrivingBalance = line.balanceAfter ? kobo(line.balanceAfter) : null;
+  const differing = [
+    row.direction === line.direction ? null : 'direction',
+    row.amount_kobo === kobo(line.amount) ? null : 'amount',
+    row.balance_after_kobo === arrivingBalance ? null : 'balance_after',
+    row.value_date.getTime() === line.valueDate.getTime() ? null : 'value_date',
+    row.narration === line.narration ? null : 'narration',
+  ].filter((field): field is string => field !== null);
+
+  if (differing.length === 0) return null;
+
+  return {
+    idempotencyKey: line.idempotencyKey,
+    arriving: line,
+    stored: {
+      direction: row.direction,
+      amountKobo: row.amount_kobo,
+      balanceAfterKobo: row.balance_after_kobo,
+      valueDate: row.value_date,
+      narration: row.narration,
+      evidenceId: row.evidence_id,
+    },
+    differing,
+  };
 }
 
 /** The newest value date in a statement — when it is current *to*, taken from the file. */

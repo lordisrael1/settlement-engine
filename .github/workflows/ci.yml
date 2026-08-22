@@ -6,11 +6,18 @@
 # this morning, which is why this file exists and why it runs the *whole* suite.
 #
 # The Postgres service below is the point, not a detail. Without `DATABASE_URL` the suite
-# silently shrinks from 226 tests to 115 — the trigger-enforced invariants, the replay
+# silently shrinks from 257 tests to 137 — the trigger-enforced invariants, the replay
 # determinism check, the exception queue's lifecycle, the durable inbox and every API route
 # are all `skip`ped, because none of them can be honestly tested against a fake. A green
 # run with no database would report success while never touching the half of the system
 # that makes the claims.
+#
+# Among the tests that only exist with a database: that a bounded run does not close the
+# exceptions it never looked at, that a run never closes one a person has acknowledged, that
+# a second bank credit wearing a stored credit's id is refused rather than deduplicated away,
+# and that a reserve past its release date is chased and clears itself when it comes back.
+# Every one of those is a claim about what Postgres does, and a mock of it would agree with
+# whatever the design already believed.
 
 name: CI
 

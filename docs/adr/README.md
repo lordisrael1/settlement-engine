@@ -77,3 +77,11 @@ New record: copy the most recent file, take the next number, and add a row below
 | 0065 | [Evidence is split into an immutable record and an expiring body, on a schedule a command runs](0065-evidence-retention-schedule.md) | Accepted — supersedes the retention half of ADR-0033 |
 | 0066 | [Tokens and approved truncations only, and every read of a document is attributable](0066-pci-scope-and-evidence-access.md) | Accepted — supersedes the operator-identity half of ADR-0052 |
 | 0067 | [Format drift is a keyed record with a lifecycle, not a counter in a response](0067-format-drift-is-a-record-not-a-counter.md) | Accepted |
+| 0068 | [The bank file is the trust boundary: identity is a contract, and provenance is a human control](0068-the-bank-file-is-the-trust-boundary.md) | Accepted — amends ADR-0057, narrows ADR-0027 |
+| 0069 | [A refund may be for part of a payment](0069-partial-refunds-and-chargebacks.md) | Accepted — amends ADR-0024 |
+| 0070 | [Arithmetic-only matching is a small-batch feature, and says so](0070-arithmetic-matching-is-a-small-batch-feature.md) | Accepted |
+| 0071 | [A withheld reserve carries a deadline, or it is money nobody chases](0071-reserves-carry-a-deadline.md) | Accepted |
+| 0072 | [Same-amount credits are paired as a set, or the queue depth tracks transaction volume](0072-same-amount-credits-are-paired-as-a-set.md) | Accepted — narrows ADR-0035 |
+| 0073 | [Retries back off, and a rotated secret keeps its predecessor](0073-retries-back-off-and-secrets-overlap.md) | Accepted — amends ADR-0050 |
+| 0074 | [The last mile: reconciliation runs itself, and health reaches a verdict](0074-the-last-mile-is-a-schedule-and-a-verdict.md) | Accepted |
+| 0075 | [The queue clears only what the run looked at, and never what a person owns](0075-clearing-is-bounded-by-what-the-run-saw.md) | Accepted — amends ADR-0044 |

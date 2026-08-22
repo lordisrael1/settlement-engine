@@ -153,6 +153,36 @@ Converting a particular bank's CSV into that shape is deliberately outside this 
 Nigerian bank exports a different CSV and several change it without notice, so the per-bank
 knowledge stays where per-bank knowledge belongs.
 
+Two clauses of that hand-off are checked here rather than assumed, because both sit directly
+on top of the only evidence that can book cash ([ADR-0068](adr/0068-the-bank-file-is-the-trust-boundary.md)):
+
+**`id` is unique within the account, forever.** Most Nigerian bank exports have no per-row id,
+so a converter synthesises one — and the obvious synthesis, a hash of date, amount and
+narration, produces one id for two genuine credits the day two customers pay the same ₦5,000
+subscription with the same narration. The second used to vanish on `ON CONFLICT DO NOTHING`,
+indistinguishable from the redelivery that clause exists to absorb; the payout it should have
+confirmed then escalated as a missing settlement while the cash sat in the real account.
+Include the running balance or a within-file sequence. A repeated id in one file is refused,
+and a row conflicting with a *different* stored row is refused and queued as
+`BANK_LINE_COLLISION`.
+
+**`date` is ISO-8601.** `new Date("02/01/2026")` is the 1st of February in every JavaScript
+engine; a Nigerian export written DD/MM means the 2nd of January.
+
+### And nothing proves the file came from the bank
+
+Worth stating plainly, because the three-way design invites the opposite assumption. The bank
+statement is the record whose word is final — but *the word of the bank* and *a file somebody
+uploaded* are not the same thing, and this system has only the second. `POST /ingest/bank` is
+behind an API key and that is the whole control.
+
+`verify` cannot catch a fabrication: it proves internal conservation, and a fabricated
+statement that balances is internally conserved. Until the open-banking feed exists, the
+control is out-of-band and human — `GET /bank/position` for what the system can check by
+itself, `POST /bank/attestations` for a named person comparing against the bank's own portal,
+and a `bank_unattested` alert when a week passes without one. See *The trust boundary* in the
+README.
+
 ## Matching
 
 Reconciliation partitions differences into three buckets: **matched**, **explained** and
@@ -171,6 +201,10 @@ The provider's report meets the ledger. Nothing is booked.
 | Same reference, and a dated fee contract explains the whole difference | `FEE_ADJUSTED_MATCH` |
 | No shared reference, and exactly one combination of promises sums to the movement | `BATCH_MATCH` |
 | Only part of a payment is covered | `PARTIAL_SETTLEMENT` |
+| A settlement line reverses the whole payment | `REVERSAL` |
+| A settlement line reverses part of it, and the rest is still coming | `PARTIAL_REVERSAL` |
+| A payout with no gross at all, returning a reserve the PSP had withheld | `RESERVE_RELEASED` |
+| The payout batches more promises than the bounded search may hold — so nobody looked | `BATCH_TOO_LARGE` |
 | Nothing matched, and the business-day deadline has not passed | `PENDING_T_PLUS_N` |
 
 ### Stage two — bank confirmation
@@ -181,16 +215,24 @@ The bank statement meets the report. This is the only stage that books cash.
 |---|---|
 | A credit whose narration carries the payout's own reference | `BANK_CONFIRMED` |
 | A credit whose amount and date fit exactly one open inflow | `BANK_CONFIRMED`, lower confidence |
+| Several identical credits and the same number of identical inflows, none named | `BANK_CONFIRMED`, lower still — the *set* is unambiguous even though no member is ([ADR-0072](adr/0072-same-amount-credits-are-paired-as-a-set.md)) |
 | The same, less a shortfall inside the source's bank-charge allowance | `BANK_CHARGE` |
 | Reported, and the bank has not seen it yet | `AWAITING_BANK_CREDIT` |
 | A second credit for a payout already confirmed | `DUPLICATE_BANK_CREDIT` |
 | A debit matching a banked payout | `RETURNED_PAYOUT` |
 | A credit that identifies nothing and matches nothing | `UNIDENTIFIED_CREDIT` |
+| A reserve past the date the source undertook to return it | `RESERVE_UNRELEASED` |
 
 A confirmation books in one transaction: cash to `bank_account`, every named deduction to its
 own account, and the receivable closed. If the credit and the named deductions do not account
 for the receivable exactly, the booking is refused rather than plugged
 ([ADR-0029](adr/0029-named-deductions-and-no-plug-entries.md)).
+
+One credit discharges no receivable at all: a reserve coming back. It moves `psp_reserve` into
+`bank_account` and closes nothing, because nothing new was earned — the money was always ours
+and the PSP finally sent it. It has its own booking for exactly that reason, since a credit
+with nothing to discharge is otherwise a phantom
+([ADR-0071](adr/0071-reserves-carry-a-deadline.md)).
 
 ### The matcher does not guess
 
@@ -199,6 +241,21 @@ fitting two open inflows equally well, a reference naming two promises, and a sh
 larger than the source's bank-charge allowance. A wrong match does not fail loudly — it
 settles the wrong records and leaves the right ones to escalate later as inexplicable
 absences ([ADR-0035](adr/0035-the-matcher-escalates-ambiguity.md)).
+
+There is exactly one narrowing of that rule, and it is narrow on purpose. Where several
+credits and the same number of inflows all carry one amount and none of them is named, the
+*set* has a single pairing up to ordering — and because every member carries the same amount,
+each booking's entries are identical whichever way round it falls. What differs is only which
+statement row is filed as evidence for which payout, which is recorded as the imprecision it
+is: a lower confidence, and the alternatives kept alongside the match. Without it, a
+fixed-price business escalates two obvious credits every day and the queue's depth tracks
+transaction volume ([ADR-0072](adr/0072-same-amount-credits-are-paired-as-a-set.md)).
+
+And there is one case where the matcher says something weaker than "no": a payout batching
+more promises than the bounded subset search may hold is escalated as `BATCH_TOO_LARGE`, with
+every candidate marked `not_attempted`. "We compared everything and nothing fitted" and "we did
+not look" point a person in different directions, and the second used to be reported as the
+first ([ADR-0070](adr/0070-arithmetic-matching-is-a-small-batch-feature.md)).
 
 ## When many payments become one movement
 
@@ -309,6 +366,27 @@ findings against what is open and closes what it no longer finds, with the cause
 `evidence_arrived` for a self-clearing item, `resolved_by_human` for a decision somebody
 made. See [ADR-0043](adr/0043-exceptions-are-entities.md) and
 [ADR-0044](adr/0044-the-queue-clears-itself.md).
+
+Auto-clearing has two limits, and both exist because the mechanism that keeps the queue small
+is also the one that could silently empty it
+([ADR-0075](adr/0075-clearing-is-bounded-by-what-the-run-saw.md)):
+
+**A run clears only what it looked at.** Every loader stops at `RECON_RECONCILE_LIMIT`. Past
+that bound the matcher never considers the remaining records, reaches no conclusion about
+them, and they are absent from the findings — so a run reports how far it saw, and anything
+outside that window is left alone and counted as `queue.withheld`. A `withheld` figure that
+persists across runs means the queue no longer fits inside the bound.
+
+**A run never closes what a person has taken.** Only `open` exceptions clear automatically. An
+`acknowledged` one belongs to a named human who is investigating it; if the problem really has
+gone, they close it, and the queue records who did.
+
+One finding does not come from comparing two records at all. A reserve past the date its source
+undertook to return it is raised from the *books* — money nobody disputes we are owed, that
+nobody has sent back, and that no third record will ever mention. Without a deadline attached
+to each withholding, a PSP returning reserves on schedule and one returning none produce
+identical balances, identical matches and an identical empty queue
+([ADR-0071](adr/0071-reserves-carry-a-deadline.md)).
 
 A human resolution is appended, never applied: it is a named decision, maker-checked, posting
 its own compensating entry in the same database transaction, and it may never touch

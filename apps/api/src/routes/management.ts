@@ -7,18 +7,24 @@ import { allBalances } from '@recon/ledger-core';
 import { buildPolicy } from '@recon/policy';
 import {
   acknowledgeAnomaly,
+  attestBankBalance,
+  bankPosition,
   exceptionAt,
   exceptionHistory,
+  lastAttestation,
   openAnomalies,
   openExceptions,
   reconcile,
+  reservePositions,
   resolveException,
   summarize,
 } from '@recon/reconciler';
 
 import { principalOf, requireApiKey } from '../auth.js';
+import { addressOf, rateLimit } from '../ratelimit.js';
 import {
   asBalances,
+  asMoney,
   asDelivery,
   asException,
   asRun,
@@ -44,6 +50,17 @@ import type { Services } from '../services.js';
  */
 export const managementRoutes: FastifyPluginCallback<Services> = (app, services, done) => {
   const { pool, config, now } = services;
+
+  // Keyed by principal once there is one, and by address before then — an unauthenticated
+  // caller guessing keys is exactly the traffic worth limiting, and it has no principal yet.
+  // Registered before the authentication hook so a flood of bad keys costs a map lookup
+  // rather than a digest comparison per request.
+  rateLimit(
+    app,
+    config.rateLimits.management,
+    (request) => request.principal?.name ?? `anon:${addressOf(request)}`,
+    now,
+  );
 
   app.addHook('onRequest', requireApiKey(config));
 
@@ -99,6 +116,10 @@ export const managementRoutes: FastifyPluginCallback<Services> = (app, services,
         asOf: now(),
         policyFor: await buildPolicy(pool, config.merchantId),
         limit: config.reconcileLimit,
+        // The bounded subset search, with the deployment's own bound. The default is a
+        // small-batch one and a provider that reports payout totals without per-line
+        // references needs it raised (ADR-0070).
+        limits: config.subsetLimits,
       });
       return reply.code(201).send(asRun(run));
     },
@@ -317,8 +338,172 @@ export const managementRoutes: FastifyPluginCallback<Services> = (app, services,
     },
   );
 
+  // ── Our money, in somebody else's account ─────────────────────────────────
+  //
+  // `psp_reserve` is an asset, and the balance alone is unfalsifiable: a PSP returning
+  // reserves on schedule and one returning none of them produce the same number. This is
+  // that number taken apart — which payout, withheld when, due when, still out how much
+  // (ADR-0071).
+  app.get<{ Querystring: { limit?: string } }>(
+    '/reserves',
+    {
+      schema: {
+        tags: ['Reconciliation'],
+        operationId: 'reserves',
+        summary: 'Reserves withheld and not yet returned',
+        description:
+          'Oldest first, overdue ones first of all. A hold with no dueAt belongs to a source ' +
+          'that declared no release schedule: never overdue, never self-clearing, and worth ' +
+          'noticing for exactly that reason.',
+      },
+    },
+    async (request) => {
+      // Bounded like every other list here. Parsed rather than trusted: an unparseable or
+      // absurd `limit` falls back to the default instead of becoming a 400, because a
+      // reserve list is a read and a reader who typed the query wrong wants the list.
+      const asked = Number(request.query.limit);
+      const limit = Number.isInteger(asked) && asked > 0 && asked <= 1000 ? asked : 500;
+      const positions = await reservePositions(pool, limit);
+      const at = now();
+
+      return {
+        reserves: positions.map((position) => ({
+          inflowKey: position.inflowKey,
+          source: position.source,
+          withheld: asMoney(position.withheld),
+          released: asMoney(position.released),
+          outstanding: asMoney(position.outstanding),
+          withheldAt: position.withheldAt.toISOString(),
+          dueAt: position.dueAt?.toISOString() ?? null,
+          overdue: position.dueAt !== null && position.dueAt < at,
+          confirmedBy: position.confirmedBy,
+          evidenceId: position.evidenceId,
+        })),
+      };
+    },
+  );
+
+  // ── The trust boundary ────────────────────────────────────────────────────
+  //
+  // Cash here is booked from an uploaded file, and nothing proves that file came from the
+  // bank: no signature on the bytes, no feed, no independent check. Anyone holding an ingest
+  // key can produce a statement that confirms inflows and moves `psp_receivable` into
+  // `bank_account`. `verify` does not catch it and could not — it proves the books are
+  // *internally* consistent, and a fabricated statement that balances is internally
+  // consistent (ADR-0068).
+  //
+  // These two endpoints are the honest response to that, and neither pretends to be a fix.
+  // The first is the check the system can make on its own; the second records a check only a
+  // person can make.
+  app.get(
+    '/bank/position',
+    {
+      schema: {
+        tags: ['Reconciliation'],
+        operationId: 'bankPosition',
+        summary: 'Our books against the bank\'s own arithmetic',
+        description:
+          "Compares `bank_account`, summed from entries, to the running balance on the last " +
+          'statement line ingested. Catches a half-ingested statement or an unmodelled debit. ' +
+          'It does NOT prove the statement came from the bank: a fabricated file carries a ' +
+          'fabricated running balance and agrees with itself perfectly.',
+      },
+    },
+    async () => {
+      const position = await bankPosition(pool, config.bankAccountId);
+      const last = await lastAttestation(pool, config.bankAccountId);
+
+      return {
+        bankAccountId: position.bankAccountId,
+        ledgerBalance: asMoney(position.ledgerBalance),
+        statementClosing: position.statementClosing ? asMoney(position.statementClosing) : null,
+        statementAt: position.statementAt?.toISOString() ?? null,
+        difference: position.difference ? asMoney(position.difference) : null,
+        // Expected to be non-zero, and saying so here rather than leaving a reader to
+        // discover it: the real account holds movements this system never models.
+        differenceIsExpected:
+          'The real account holds movements this system does not model — supplier payments, ' +
+          'salaries, standing orders. The question is not whether this is zero but whether ' +
+          'anybody can say what it consists of.',
+        lastAttestation: last
+          ? {
+              asOf: last.asOf.toISOString(),
+              attestedBy: last.attestedBy,
+              portalBalance: asMoney(last.portalBalance),
+              difference: asMoney(last.difference),
+              note: last.note,
+            }
+          : null,
+      };
+    },
+  );
+
+  app.post<{ Body: AttestBody }>(
+    '/bank/attestations',
+    {
+      schema: {
+        body: ATTEST_SCHEMA,
+        tags: ['Reconciliation'],
+        operationId: 'attestBankBalance',
+        summary: 'Record that a person compared the books to the bank',
+        description:
+          'The only control over a fabricated bank statement, and it is out-of-band by ' +
+          'necessity: a human reads the bank\'s own portal and records what it said. ' +
+          'Append-only — an attestation that can be edited afterwards is not evidence that ' +
+          'somebody checked.',
+      },
+    },
+    async (request, reply) => {
+      const body = request.body;
+      const at = now();
+
+      const attested = await attestBankBalance(pool, {
+        bankAccountId: body.bankAccountId ?? config.bankAccountId,
+        // When they read the portal, not when they posted this. A balance read at 09:00 and
+        // recorded at 11:00 is a statement about 09:00.
+        asOf: body.asOf ? new Date(body.asOf) : at,
+        portalBalance: money(BigInt(body.portalBalanceKobo)),
+        // The verified principal, never a name the caller supplied about itself. This is an
+        // audit record of a human control, and a self-declared one would record nothing.
+        attestedBy: principalOf(request).name,
+        note: body.note ?? null,
+        recordedAt: at,
+      });
+
+      return reply.code(201).send({
+        bankAccountId: attested.bankAccountId,
+        asOf: attested.asOf.toISOString(),
+        portalBalance: asMoney(attested.portalBalance),
+        ledgerBalance: asMoney(attested.ledgerBalance),
+        difference: asMoney(attested.difference),
+        attestedBy: attested.attestedBy,
+      });
+    },
+  );
+
   done();
 };
+
+interface AttestBody {
+  /** Integer kobo, as a string: a BIGINT must never round-trip through a JSON number. */
+  readonly portalBalanceKobo: string;
+  readonly bankAccountId?: string;
+  /** ISO-8601. When the portal was read, not when this was posted. */
+  readonly asOf?: string;
+  readonly note?: string;
+}
+
+const ATTEST_SCHEMA = {
+  type: 'object',
+  required: ['portalBalanceKobo'],
+  additionalProperties: false,
+  properties: {
+    portalBalanceKobo: { type: 'string', pattern: '^-?\\d+$' },
+    bankAccountId: { type: 'string', minLength: 1 },
+    asOf: { type: 'string', format: 'date-time' },
+    note: { type: 'string', maxLength: 2000 },
+  },
+} as const;
 
 interface ResolveBody {
   readonly resolutionKey: string;

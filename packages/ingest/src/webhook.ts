@@ -17,8 +17,21 @@ export interface WebhookIngestInput {
    * escaping — which fails verification for entirely valid payloads.
    */
   readonly rawBody: Buffer;
-  /** The webhook secret. An argument, never an environment read at this layer. */
-  readonly secret: string;
+  /**
+   * The webhook secret, or **the secrets in force**. An argument, never an environment read
+   * at this layer.
+   *
+   * A list rather than a value because rotation has an overlap. The durable inbox verifies
+   * at acceptance and *again* at drain time, so a secret rotated while a backlog exists
+   * would make every pending delivery signed with the old secret fail its second check —
+   * and the worker's answer to that is `rejected`, which is terminal and un-retried. Real
+   * payments, discarded, because somebody rotated a credential on a busy afternoon.
+   *
+   * So both the outgoing and incoming secrets are held during a rotation, every one is
+   * tried, and the old one is removed when the backlog is empty (ADR-0073). A single string
+   * is still accepted, because most of the time that is the truth.
+   */
+  readonly secret: string | readonly string[];
 }
 
 export type WebhookIngestResult =
@@ -45,11 +58,24 @@ export type WebhookIngestResult =
  * and not a scheme.
  */
 export function verifyWebhook(input: WebhookIngestInput): boolean {
-  return sourceProfile(input.source).connector.verifyWebhookSignature({
-    headers: input.headers,
-    rawBody: toRawBody(input.rawBody),
-    secret: input.secret,
-  });
+  const { connector } = sourceProfile(input.source);
+  const rawBody = toRawBody(input.rawBody);
+
+  // Every secret in the ring is tried, and the loop is deliberately not short-circuited on
+  // an empty ring: `[]` verifies nothing, which is the correct answer for "we hold no
+  // secret" and is what the caller's 503 is for.
+  //
+  // No constant-time reasoning is needed *here* — the comparison that matters is inside the
+  // connector's own `verifyWebhookSignature`, and trying two secrets reveals only that two
+  // secrets were tried, which is public in the sense that it is the documented behaviour of
+  // every rotation window in the world.
+  return secretsOf(input.secret).some((secret) =>
+    connector.verifyWebhookSignature({ headers: input.headers, rawBody, secret }),
+  );
+}
+
+function secretsOf(secret: string | readonly string[]): readonly string[] {
+  return typeof secret === 'string' ? [secret] : secret;
 }
 
 /**

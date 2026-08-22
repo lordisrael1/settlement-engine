@@ -119,6 +119,14 @@ export function asRun(run: ReconciliationRun): unknown {
     booked: run.booked,
     failures: run.failures,
     queue: run.queue,
+    // How much of each record the run actually read, and whether it reached the end.
+    //
+    // Carried because every bound in the engine is invisible from the outside: a run over the
+    // first thousand payouts of four thousand returns a body identical in shape to one over
+    // all of them, and only one of those is a reconciliation. `queue.withheld` is the same
+    // fact from the other side — exceptions this run declined to close because it never
+    // looked at their subjects, or because a person owns them (ADR-0075).
+    window: run.window,
   };
 }
 

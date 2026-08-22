@@ -53,12 +53,19 @@ const policy: PolicyLookup = () => ({
   calendar: CALENDAR,
   expectedFee: (gross) => feeFor(CARD, gross, CARD_CONTRACT),
   bankChargeAllowance: 10_000n, // ₦100
+  reserveReleaseDays: 90,
+  // Off by default in this suite: most cases here are about one credit meeting one
+  // inflow, and set-level pairing would quietly rescue the ambiguity a few of them are
+  // asserting. The cases that exercise it turn it on explicitly.
+  pairEqualAmounts: false,
 });
 
 const noRateCard: PolicyLookup = () => ({
   calendar: CALENDAR,
   expectedFee: null,
   bankChargeAllowance: 0n,
+  pairEqualAmounts: false,
+  reserveReleaseDays: null,
 });
 
 function promise(id: string, gross: bigint, occurredAt = T0): LedgerTransaction {
@@ -721,4 +728,289 @@ test('an inflow with no deductions still balances', () => {
   assert.deepEqual(result.prepared[0]!.inflow.deductions, []);
   assert.equal(result.prepared[0]!.inflow.expectedNet.kobo, 1_000_000n);
   assert.equal(ZERO.kobo, 0n);
+});
+
+// ── The bounded search says when it did not look ────────────────────────────
+
+/**
+ * The distinction ADR-0070 exists for.
+ *
+ * `PHANTOM_CREDIT` is an assertion: we compared every combination of your promises against
+ * this payout and none of them fit — which points at a missing webhook, a duplicated
+ * reference, a real data problem. A truncated search that reports it is asserting arithmetic
+ * nobody performed, and sends a person hunting for a problem that does not exist.
+ */
+test('a payout batching more promises than the bound escalates as unlooked-at, not unmatched', () => {
+  // Twenty-five promises against a bound of twenty-four. The payout's gross is genuinely the
+  // sum of the first three, so the old truncating search would have *found* it — which is
+  // exactly why the size of the pool, not the solvability of the target, has to be the test.
+  const promises = Array.from({ length: 25 }, (_, index) =>
+    promise(`pay-${index}`, BigInt(100_000 + index * 1_000)),
+  );
+
+  const result = allocateWith(promises, [payout('PO-BIG', 303_000n, [])], [], noRateCard);
+
+  const escalated = only(result.exceptions);
+  assert.equal(escalated.reason, 'BATCH_TOO_LARGE');
+  assert.equal(reasonKind(escalated.reason), 'exception');
+  assert.deepEqual(escalated.payoutReferences, ['PO-BIG']);
+  assert.equal(result.prepared.length, 0, 'nothing may be prepared from a search that never ran');
+
+  // And the working says what it is. Every candidate carries `not_attempted`, never
+  // `amount_differs`: the second would be a claim about a comparison that did not happen.
+  assert.ok(escalated.considered.length > 0);
+  for (const candidate of escalated.considered) {
+    assert.equal(candidate.rejectedBecause, 'not_attempted');
+  }
+});
+
+test('a payout inside the bound still escalates as unmatched when nothing fits', () => {
+  const result = allocateWith(
+    [promise('pay-1', 100_000n), promise('pay-2', 200_000n)],
+    [payout('PO-ODD', 777_777n, [])],
+    [],
+    noRateCard,
+  );
+
+  const escalated = only(result.exceptions);
+  assert.equal(escalated.reason, 'PHANTOM_CREDIT', 'we looked, and nothing fitted');
+  assert.deepEqual(
+    escalated.considered.map((candidate) => candidate.rejectedBecause),
+    ['amount_differs', 'amount_differs'],
+  );
+});
+
+// ── Two identical credits, two identical payouts ────────────────────────────
+
+const pairing: PolicyLookup = () => ({
+  calendar: CALENDAR,
+  expectedFee: null,
+  bankChargeAllowance: 0n,
+  reserveReleaseDays: 90,
+  pairEqualAmounts: true,
+});
+
+/**
+ * Two payouts that *net* to the same figure, which is the shape that reaches stage three.
+ *
+ * Note the grosses differ: two identical grosses would be ambiguous one stage earlier, in the
+ * subset search, and would never produce a pair of inflows to argue about. Equal nets from
+ * unequal grosses is the ordinary case — a fee, a tax, a rounding — and it is what a bank
+ * credit actually sees.
+ */
+const sameNetInflows = (policyFor: PolicyLookup = pairing) =>
+  inflowOf(
+    [promise('pay-1', 500_000n), promise('pay-2', 600_000n)],
+    [payout('PO-A', 500_000n, []), payout('PO-B', 600_000n, [deduction('fee', 100_000n)])],
+    policyFor,
+  );
+
+/**
+ * The ordinary Tuesday of a fixed-price business, and the shape that used to fill the queue.
+ *
+ * Two payouts netting the same figure on the same day arrive as two identical credits. Each
+ * credit alone is ambiguous; the *set* is not. See ADR-0072 for why this is a finding rather
+ * than a guess: every member carries the same amount, so each booking's entries are identical
+ * whichever way round the bijection falls.
+ */
+test('two identical credits and two same-net payouts are paired rather than escalated', () => {
+  const inflows = sameNetInflows();
+  assert.equal(inflows.length, 2);
+
+  const result = confirm({
+    inflows,
+    bankLines: [
+      credit('bank-2', 500_000n, { valueDate: new Date('2026-08-14T09:00:00Z') }),
+      credit('bank-1', 500_000n, { valueDate: new Date('2026-08-13T09:00:00Z') }),
+    ],
+    policyFor: pairing,
+    asOf: ASOF,
+  });
+
+  assert.equal(result.confirmed.length, 2);
+  assert.equal(result.exceptions.length, 0, 'neither is a mystery');
+
+  // FIFO by value date, so the answer is the one a human would give and is the same answer
+  // every time (determinism).
+  const byCredit = new Map(result.confirmed.map((c) => [c.credit.idempotencyKey, c.result]));
+  const first = byCredit.get('bank-1');
+  const second = byCredit.get('bank-2');
+
+  assert.deepEqual(
+    result.confirmed.map((c) => [c.credit.idempotencyKey, c.inflow.key]).sort(),
+    [
+      ['bank-1', 'PO-A'],
+      ['bank-2', 'PO-B'],
+    ],
+  );
+
+  // The first is the set pairing, and it says so: 0.7, below the 0.85 of a unique amount,
+  // because which member of the set this row is remains a convention rather than a finding.
+  // It is also the only successful match in this engine that keeps its working.
+  assert.equal(first?.confidence, 0.7);
+  assert.equal(first?.reason, 'BANK_CONFIRMED');
+  assert.equal(first?.considered.length, 1);
+  assert.equal(first?.considered[0]!.rejectedBecause, 'ambiguous');
+
+  // The second needs no pairing at all: its twin has been claimed, so exactly one inflow now
+  // matches its amount and the ordinary uniqueness rule answers it. The set pairing does the
+  // least work it can, which is the property that keeps it from reaching past its own case.
+  assert.equal(second?.confidence, 0.85);
+  assert.deepEqual(second?.considered, []);
+});
+
+/**
+ * The refusal that keeps the pairing honest. Three credits against two inflows means one of
+ * the credits is something else, and pairing any of them is choosing which mystery to ignore.
+ */
+test('three credits against two same-net payouts escalates all three', () => {
+  const inflows = sameNetInflows();
+
+  const result = confirm({
+    inflows,
+    bankLines: [
+      credit('bank-1', 500_000n),
+      credit('bank-2', 500_000n),
+      credit('bank-3', 500_000n),
+    ],
+    policyFor: pairing,
+    asOf: ASOF,
+  });
+
+  assert.equal(result.confirmed.length, 0);
+  assert.equal(result.exceptions.length, 3);
+  for (const escalated of result.exceptions) {
+    assert.equal(escalated.reason, 'UNIDENTIFIED_CREDIT');
+  }
+});
+
+test('a source that has not enabled set pairing still escalates both', () => {
+  const inflows = sameNetInflows(noRateCard);
+
+  const result = confirm({
+    inflows,
+    bankLines: [credit('bank-1', 500_000n), credit('bank-2', 500_000n)],
+    policyFor: noRateCard,
+    asOf: ASOF,
+  });
+
+  assert.equal(result.confirmed.length, 0);
+  assert.equal(result.exceptions.length, 2);
+});
+
+/** A named credit is better evidence and must never be pre-empted by the arithmetic. */
+test('a credit that names its payout wins over the set pairing', () => {
+  const inflows = inflowOf(
+    [promise('pay-1', 500_000n), promise('pay-2', 600_000n)],
+    [
+      payout('PO-ALPHA-1', 500_000n, []),
+      payout('PO-ALPHA-2', 600_000n, [deduction('fee', 100_000n)]),
+    ],
+    pairing,
+  );
+
+  const result = confirm({
+    inflows,
+    // The later credit names the *earlier* payout, so FIFO pairing would get it backwards.
+    bankLines: [
+      credit('bank-1', 500_000n, { valueDate: new Date('2026-08-13T09:00:00Z') }),
+      credit('bank-2', 500_000n, {
+        narration: 'TRF REF PO-ALPHA-1',
+        valueDate: new Date('2026-08-14T09:00:00Z'),
+      }),
+    ],
+    policyFor: pairing,
+    asOf: ASOF,
+  });
+
+  const named = result.confirmed.find((c) => c.credit.idempotencyKey === 'bank-2');
+  assert.equal(named?.inflow.key, 'PO-ALPHA-1');
+  assert.equal(named?.result.confidence, 1, 'the bank told us; nothing beats that');
+});
+
+// ── A refund for part of a payment ──────────────────────────────────────────
+
+function settlementLine(
+  reference: string,
+  gross: bigint,
+  status: SettlementLine['status'],
+): SettlementLine {
+  return {
+    reference,
+    source: 'alpha',
+    payoutReference: null,
+    merchantId: 'merchant-under-test',
+    channel: 'card',
+    gross: money(gross),
+    fee: ZERO,
+    net: money(gross),
+    status,
+    settledAt: VALUE_DATE,
+    reasonHints: [],
+    evidenceId: 'evidence-settlement',
+    lineage: NO_LINEAGE,
+    idempotencyKey: `settlement:alpha:${reference}`,
+  };
+}
+
+/**
+ * A customer cancels one line of a four-item basket. ADR-0069: booking the whole ₦10,000 back
+ * would say the PSP owes us nothing while it still owes us ₦7,000, and the ₦7,000 that does
+ * settle later would arrive against a promise the ledger had closed.
+ */
+test('a refund smaller than the payment takes back only what came back', () => {
+  const result = allocateWith(
+    [promise('pay-1', 1_000_000n)],
+    [],
+    [settlementLine('pay-1', 300_000n, 'reversed')],
+    noRateCard,
+  );
+
+  assert.equal(result.prepared.length, 1);
+  const prepared = result.prepared[0]!;
+  assert.equal(prepared.result.reason, 'PARTIAL_REVERSAL');
+  assert.equal(reasonKind(prepared.result.reason), 'explanation');
+  assert.equal(prepared.allocations[0]!.amount.kobo, 300_000n, 'only what came back');
+  // The receivable stays whole: it is what the booking compares against to decide whether the
+  // promise's story has ended, and shrinking it would make every partial look total.
+  assert.equal(prepared.allocations[0]!.receivable.kobo, 1_000_000n);
+
+  // …and the rest is still owed, so it is still waiting rather than missing.
+  const waiting = result.deferred.find((r) => r.transactionIds.includes('pay-1'));
+  assert.equal(waiting?.reason, 'PARTIAL_SETTLEMENT');
+});
+
+test('a refund for the whole payment is still a whole reversal', () => {
+  const result = allocateWith(
+    [promise('pay-1', 1_000_000n)],
+    [],
+    [settlementLine('pay-1', 1_000_000n, 'reversed')],
+    noRateCard,
+  );
+
+  assert.equal(result.prepared[0]!.result.reason, 'REVERSAL');
+  assert.equal(result.prepared[0]!.result.confidence, 1);
+  assert.equal(result.prepared[0]!.allocations[0]!.amount.kobo, 1_000_000n);
+});
+
+/**
+ * Two shapes that are not refunds at all, and are refused rather than booked. Both are parse
+ * errors wearing a plausible face: a line that reverses nothing, and one that gives back more
+ * than was ever charged.
+ */
+test('a reversal of nothing, or of more than was charged, escalates', () => {
+  for (const gross of [0n, 2_000_000n]) {
+    const result = allocateWith(
+      [promise('pay-1', 1_000_000n)],
+      [],
+      [settlementLine('pay-1', gross, 'reversed')],
+      noRateCard,
+    );
+    assert.equal(result.prepared.length, 0, `gross ${gross} must not book`);
+    assert.equal(
+      result.exceptions.some((r) => r.reason === 'AMOUNT_MISMATCH'),
+      true,
+      `gross ${gross} must escalate`,
+    );
+  }
 });

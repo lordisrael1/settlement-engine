@@ -81,10 +81,28 @@ const CONFIDENCE = {
   bankByReference: 1,
   /** The amount and date fit exactly one expected inflow, and nothing else. */
   bankByAmount: 0.85,
+  /**
+   * The amount fits several inflows — and so does every other credit for that amount, in
+   * exactly the same number. The *set* is unambiguous; this credit alone is not.
+   *
+   * Below `bankByAmount` because that is exactly what is weaker about it: which member of
+   * the set this particular row is remains a convention (earliest value date first), not a
+   * finding. The amounts are identical, so nothing financial turns on it.
+   */
+  bankByAmountSet: 0.7,
   /** As above, less a charge the bank did not announce. */
   bankCharge: 0.75,
   reversal: 1,
   chargeback: 1,
+  /**
+   * A refund or clawback smaller than the payment it is against.
+   *
+   * Below a whole reversal on purpose. The linkage is just as certain — both sides name the
+   * same reference — but the *amount* is a claim only the PSP made, and a file that reports
+   * ₦3,000 against a ₦10,000 charge is one field away from reporting ₦300. Whole reversals
+   * are self-checking against the receivable; partial ones are not.
+   */
+  partialReversal: 0.9,
   /** "Not yet" is a conclusion, not a guess: the deadline is arithmetic on declared data. */
   pending: 1,
   /** We have no explanation at all. Saying so with confidence would be a contradiction. */
@@ -116,6 +134,20 @@ export interface OpenPromise {
 }
 
 const RECEIVABLE: AccountId = 'psp_receivable';
+
+/**
+ * The conclusions that take money back rather than expect it.
+ *
+ * A set rather than a chain of `||`, because it is now four members and the failure mode of
+ * forgetting one is silent: a partial refund would be recorded as an expected inflow and
+ * would wait forever for a bank credit that is never coming.
+ */
+const UNDOING: ReadonlySet<MatchResult['reason']> = new Set([
+  'REVERSAL',
+  'PARTIAL_REVERSAL',
+  'CHARGEBACK',
+  'PARTIAL_CHARGEBACK',
+]);
 
 export function receivableOf(transaction: LedgerTransaction): Money {
   const legs = transaction.entries
@@ -210,19 +242,60 @@ export function allocate(input: AllocateInput): AllocateResult {
       continue;
     }
 
-    const subset = solveAgainst(
+    // Money coming back rather than money arriving for the first time.
+    //
+    // A payout with no gross covers no payments — there is nothing for the subset search to
+    // search — and its adjustments are negative, because the PSP is returning something it
+    // withheld. Without this it reached the search, found nothing (correctly: there is
+    // nothing), and escalated as a `PHANTOM_CREDIT`: a payout naming no promises, which is
+    // both exactly what it is and exactly the wrong thing to call it (ADR-0071).
+    if (payout.gross.kobo === 0n && payout.expectedNet.kobo > 0n) {
+      prepared.push({
+        inflow: inflowFromPayout(payout, []),
+        // No promises are discharged, so there is nothing to apportion and nothing to
+        // allocate. The empty list is the signal `reconcile` routes on.
+        allocations: [],
+        result: {
+          ...NO_LINKS,
+          payoutReferences: [payout.payoutReference],
+          reason: 'RESERVE_RELEASED',
+          confidence: CONFIDENCE.payout,
+        },
+      });
+      continue;
+    }
+
+    const inReach = promises.filter(
+      (promise) => promise.source === payout.source && stillOwed(promise).kobo > 0n,
+    );
+
+    const solved = solveAgainst(
       payout.gross,
       payout.expectedNet,
-      promises.filter((promise) => promise.source === payout.source && stillOwed(promise).kobo > 0n),
+      inReach,
       payout.valueDate,
       policy(payout.source),
       stillOwed,
       limits,
     );
 
-    const inReach = promises.filter(
-      (promise) => promise.source === payout.source && stillOwed(promise).kobo > 0n,
-    );
+    // A batch bigger than the search's bound is not a payout that matches nothing — it is a
+    // payout nobody compared. Escalated under its own reason code so the queue says which
+    // (ADR-0070), and never absorbed into a partial match: a payout covering ninety charges
+    // is not "settling part of" the one promise big enough to hold it.
+    if (solved.kind === 'not_attempted') {
+      exceptions.push({
+        ...NO_LINKS,
+        payoutReferences: [payout.payoutReference],
+        reason: 'BATCH_TOO_LARGE',
+        confidence: CONFIDENCE.none,
+        considered: unattemptedPromises(payout.gross, inReach, stillOwed),
+      });
+      continue;
+    }
+
+    const subset = solved.kind === 'solved' ? solved.subset : null;
+
     // A payout too small for any whole promise may still be settling part of one.
     const partial = subset
       ? null
@@ -340,14 +413,20 @@ export function allocate(input: AllocateInput): AllocateResult {
 
     // A reversal or a clawback never becomes an expected inflow: no money is coming, so
     // there is nothing for a bank statement to confirm. These book on their own.
-    if (conclusion.reason === 'REVERSAL' || conclusion.reason === 'CHARGEBACK') {
-      claimed.set(promise.transactionId, sum([claimed.get(promise.transactionId) ?? ZERO, promise.gross]));
+    //
+    // The amount is the *line's*, not the promise's. A partial refund takes back part of
+    // the receivable and leaves the rest open, which is why only what was undone is
+    // claimed here — the remainder goes on waiting for the payout that will carry it
+    // (ADR-0069).
+    if (UNDOING.has(conclusion.reason)) {
+      const undone = conclusion.amount ?? promise.gross;
+      claimed.set(promise.transactionId, sum([claimed.get(promise.transactionId) ?? ZERO, undone]));
       prepared.push({
         inflow: {
           key: line.idempotencyKey,
           source: line.source,
           derived: false,
-          gross: promise.gross,
+          gross: undone,
           expectedNet: ZERO,
           deductions: [],
           valueDate: line.settledAt,
@@ -357,10 +436,13 @@ export function allocate(input: AllocateInput): AllocateResult {
         allocations: [
           {
             transactionId: promise.transactionId,
+            // The receivable stays whole. It is what the booking compares the undone
+            // amount against to decide whether the promise's story has ended, and
+            // shrinking it here would make every partial refund look like a total one.
             receivable: promise.gross,
-            amount: promise.gross,
+            amount: undone,
             deductions: [],
-            net: promise.gross,
+            net: undone,
           },
         ],
         result: {
@@ -523,6 +605,11 @@ export function confirm(input: ConfirmInput): ConfirmResult {
 
   const banked = (): ConfirmedInflow[] => [...alreadyBanked, ...bankedHere];
 
+  // Which same-amount credit goes with which same-amount inflow, decided once for the
+  // whole statement rather than credit by credit. See `pairEqualAmounts` for why the
+  // question cannot be answered one credit at a time: each of them, alone, is ambiguous.
+  const paired = pairEqualAmounts(credits, inflows, policy);
+
   for (const credit of credits) {
     const available = inflows.filter((inflow) => !spent.has(inflow.key));
 
@@ -531,12 +618,17 @@ export function confirm(input: ConfirmInput): ConfirmResult {
     // than a parser having decided at ingest time which token was a reference.
     const named = available.filter((inflow) => identifies(credit, inflow.key));
 
+    const byAmount = named.length > 0 ? undefined : uniqueByAmount(available, credit, policy);
+    // Last, and only where one credit alone could not decide: the set-level pairing. It
+    // never overrides a reference or a unique amount, and it is skipped if the inflow it
+    // names has since been claimed by either of those.
+    const bySet =
+      byAmount || named.length > 0
+        ? undefined
+        : available.find((inflow) => inflow.key === paired.get(credit.idempotencyKey));
+
     const candidate =
-      named.length === 1
-        ? named[0]
-        : named.length > 1
-          ? undefined
-          : uniqueByAmount(available, credit, policy);
+      named.length === 1 ? named[0] : named.length > 1 ? undefined : (byAmount ?? bySet);
 
     if (!candidate) {
       // Before calling it unidentified, ask the more specific question: is this the *same*
@@ -583,7 +675,12 @@ export function confirm(input: ConfirmInput): ConfirmResult {
 
     let deductions = [...candidate.deductions];
     let reason: MatchResult['reason'] = 'BANK_CONFIRMED';
-    let confidence: number = named.length === 1 ? CONFIDENCE.bankByReference : CONFIDENCE.bankByAmount;
+    let confidence: number =
+      named.length === 1
+        ? CONFIDENCE.bankByReference
+        : bySet
+          ? CONFIDENCE.bankByAmountSet
+          : CONFIDENCE.bankByAmount;
 
     if (shortfall.kobo !== 0n) {
       if (shortfall.kobo < 0n || shortfall.kobo > allowance) {
@@ -630,6 +727,21 @@ export function confirm(input: ConfirmInput): ConfirmResult {
         bankCreditKeys: [credit.idempotencyKey],
         reason,
         confidence,
+        // The working, kept even on a match — the only conclusion here where it is worth
+        // keeping. A set pairing is the one place the matcher takes an answer it could not
+        // have reached from this credit alone, so the alternatives it was chosen from
+        // travel with it rather than having to be reconstructed from the statement.
+        considered: bySet
+          ? available
+              .filter((inflow) => inflow.key !== candidate.key && equals(inflow.expectedNet, credit.amount))
+              .slice(0, MAX_CANDIDATES)
+              .map((inflow) => ({
+                candidateId: inflow.key,
+                kind: (inflow.derived ? 'settlement_line' : 'payout') as RejectedCandidate['kind'],
+                difference: ZERO,
+                rejectedBecause: 'ambiguous' as const,
+              }))
+          : [],
       },
     });
   }
@@ -826,6 +938,32 @@ function nearestPromises(
     .map((entry) => entry.candidate);
 }
 
+/**
+ * The promises a search declined to consider, and the fact that it declined.
+ *
+ * Deliberately *not* `nearestPromises`. That function's whole meaning is "these were
+ * compared and rejected for this reason", and reusing it here would put `amount_differs`
+ * beside candidates nothing ever compared — a queue entry asserting arithmetic that was
+ * never performed. These carry `not_attempted` instead, and the largest first, because the
+ * only useful thing to show a human about a batch too big to solve is what the biggest
+ * pieces of it were.
+ */
+function unattemptedPromises(
+  target: Money,
+  candidates: readonly OpenPromise[],
+  owed: (promise: OpenPromise) => Money,
+): RejectedCandidate[] {
+  return [...candidates]
+    .sort((a, b) => compareBigint(owed(b).kobo, owed(a).kobo))
+    .slice(0, MAX_CANDIDATES)
+    .map((promise) => ({
+      candidateId: promise.transactionId,
+      kind: 'transaction' as const,
+      difference: subtract(owed(promise), target),
+      rejectedBecause: 'not_attempted' as const,
+    }));
+}
+
 function compareBigint(a: bigint, b: bigint): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -856,6 +994,102 @@ function uniqueByAmount(
   return fits.length === 1 ? fits[0] : undefined;
 }
 
+/**
+ * "Obviously these two credits are these two payouts" — decided for the whole statement.
+ *
+ * `uniqueByAmount` asks a question no single credit can answer. Two payouts netting
+ * ₦250,000 on the same day produce two identical credits; each credit sees two candidates,
+ * each refuses, and both escalate as `UNIDENTIFIED_CREDIT` — while a human looking at the
+ * statement sees the answer immediately. For a fixed-price business that shape is not an
+ * edge case, it is most days, and a queue whose depth scales with transaction volume is a
+ * queue nobody opens (ADR-0072).
+ *
+ * What makes this a finding rather than a guess is that the *set* is unique even though no
+ * member of it is. Four conditions, all necessary:
+ *
+ *   **Same size.** Three credits against two inflows means one of the credits is
+ *   something else — possibly a duplicate, possibly fraud — and pairing any of them would
+ *   be picking which mystery to ignore. Sizes must match exactly.
+ *
+ *   **Nobody named.** A credit whose narration identifies an inflow, or an inflow named by
+ *   any credit in the statement, is removed from both sides first. The reference path is
+ *   strictly better evidence and must never be pre-empted by arithmetic.
+ *
+ *   **Exact amounts.** No bank-charge allowance here. The allowance exists to explain a
+ *   shortfall on a credit we have already identified; using it to *decide* identity would
+ *   let two credits ₦50 apart join one group.
+ *
+ *   **Every pairing legal.** Each credit must satisfy `notBefore` against each inflow in
+ *   the group. If some pairings are legal and others are not, the bijection is no longer
+ *   arbitrary — it carries information — and choosing one becomes a real decision that this
+ *   function is not entitled to make.
+ *
+ * Where all four hold, the pairing is FIFO by value date, which is both the convention a
+ * human would use and, being a total order on data already in the statement, deterministic.
+ */
+function pairEqualAmounts(
+  credits: readonly BankStatementLine[],
+  inflows: readonly ExpectedInflow[],
+  policyFor: (source: SourceId) => SourcePolicy,
+): Map<IdempotencyKey, string> {
+  const pairs = new Map<IdempotencyKey, string>();
+
+  // Anything the reference path can reach is out of scope on both sides, in both
+  // directions: a credit that names an inflow, and an inflow named by any credit.
+  const freeCredits = credits.filter(
+    (credit) => !inflows.some((inflow) => identifies(credit, inflow.key)),
+  );
+  const freeInflows = inflows.filter(
+    (inflow) => !credits.some((credit) => identifies(credit, inflow.key)),
+  );
+
+  const creditsByAmount = groupBy(freeCredits, (credit) => credit.amount.kobo.toString());
+  const inflowsByAmount = groupBy(freeInflows, (inflow) => inflow.expectedNet.kobo.toString());
+
+  for (const [amount, group] of [...creditsByAmount].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    const matching = inflowsByAmount.get(amount);
+    // A group of one is `uniqueByAmount`'s job and it will do it better: that path allows a
+    // bank charge, this one does not.
+    if (!matching || group.length < 2 || matching.length !== group.length) continue;
+    if (!matching.every((inflow) => policyFor(inflow.source).pairEqualAmounts)) continue;
+
+    const orderedCredits = [...group].sort(
+      (a, b) =>
+        a.valueDate.getTime() - b.valueDate.getTime() ||
+        (a.idempotencyKey < b.idempotencyKey ? -1 : 1),
+    );
+    const orderedInflows = [...matching].sort(
+      (a, b) =>
+        (a.valueDate?.getTime() ?? 0) - (b.valueDate?.getTime() ?? 0) ||
+        (a.key < b.key ? -1 : 1),
+    );
+
+    // Every credit must be legal against every inflow, or the bijection is not arbitrary
+    // and picking one would be a decision disguised as a convention.
+    const allLegal = orderedCredits.every((credit) =>
+      orderedInflows.every((inflow) => notBefore(credit, inflow)),
+    );
+    if (!allLegal) continue;
+
+    for (const [index, credit] of orderedCredits.entries()) {
+      pairs.set(credit.idempotencyKey, orderedInflows[index]!.key);
+    }
+  }
+
+  return pairs;
+}
+
+function groupBy<T>(items: readonly T[], keyOf: (item: T) => string): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const key = keyOf(item);
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(item);
+    else groups.set(key, [item]);
+  }
+  return groups;
+}
+
 /** Money cannot be credited before the PSP says it sent it. */
 function notBefore(credit: BankStatementLine, inflow: ExpectedInflow): boolean {
   if (inflow.valueDate === null) return true;
@@ -867,6 +1101,16 @@ interface Conclusion {
   readonly confidence: number;
   /** The contract that priced it, where pricing was involved at all. */
   readonly explanation?: FeeExplanation;
+  /**
+   * How much of the promise this conclusion undoes, for the conclusions that undo money.
+   *
+   * Present only for `REVERSAL`, `PARTIAL_REVERSAL`, `CHARGEBACK` and `PARTIAL_CHARGEBACK`.
+   * It exists because a refund is not necessarily a refund *of everything*: a customer
+   * cancels one line of a basket and ₦3,000 comes back off a ₦10,000 charge. Negating the
+   * whole transaction there would erase ₦7,000 of receivable the PSP still owes us
+   * (ADR-0069).
+   */
+  readonly amount?: Money;
 }
 
 /**
@@ -929,19 +1173,59 @@ function concludeByReference(
   const awaiting = promise.state === 'authorized' || promise.state === 'exception';
 
   switch (line.status) {
-    case 'reversed':
-      return awaiting ? { reason: 'REVERSAL', confidence: CONFIDENCE.reversal } : null;
+    case 'reversed': {
+      if (!awaiting) return null;
+      const undone = undoneAmount(promise, line);
+      if (!undone) return null;
+      return undone.whole
+        ? { reason: 'REVERSAL', confidence: CONFIDENCE.reversal, amount: undone.amount }
+        : {
+            reason: 'PARTIAL_REVERSAL',
+            confidence: CONFIDENCE.partialReversal,
+            amount: undone.amount,
+          };
+    }
 
-    case 'chargeback':
+    case 'chargeback': {
       // A clawback presupposes money that already landed. Against a promise still waiting
       // for its first payout there is nothing to claw back.
-      return promise.state === 'settled'
-        ? { reason: 'CHARGEBACK', confidence: CONFIDENCE.chargeback }
-        : null;
+      if (promise.state !== 'settled') return null;
+      const undone = undoneAmount(promise, line);
+      if (!undone) return null;
+      return undone.whole
+        ? { reason: 'CHARGEBACK', confidence: CONFIDENCE.chargeback, amount: undone.amount }
+        : {
+            reason: 'PARTIAL_CHARGEBACK',
+            confidence: CONFIDENCE.partialReversal,
+            amount: undone.amount,
+          };
+    }
 
     case 'settled':
       return awaiting ? concludeAmounts(promise, line, policy) : null;
   }
+}
+
+/**
+ * How much of the promise a reversing line takes back, and whether that is all of it.
+ *
+ * The line's own gross is the amount, not the promise's. That is the whole of the partial
+ * fix: `reverse` is an exact negation of a whole transaction (ADR-0024), and reaching for
+ * it whenever a `reversed` line appears silently rounds every partial refund up to a total
+ * one — the ledger says the PSP owes us nothing while it still owes us ₦7,000, and the
+ * shortfall reappears later as a `MISSING_SETTLEMENT` nobody can explain.
+ *
+ * `null` for the two shapes that are not refunds at all: nothing, and more than there ever
+ * was. Both are parse errors wearing a plausible face, and the caller escalates them as an
+ * amount mismatch rather than booking a number the file did not justify.
+ */
+function undoneAmount(
+  promise: OpenPromise,
+  line: SettlementLine,
+): { amount: Money; whole: boolean } | null {
+  if (line.gross.kobo <= 0n) return null;
+  if (line.gross.kobo > promise.gross.kobo) return null;
+  return { amount: line.gross, whole: line.gross.kobo === promise.gross.kobo };
 }
 
 /**
@@ -998,6 +1282,12 @@ function concludeAmounts(
  * needs the contract to be right, and is exactly the transformation-aware matching that
  * turns a file full of apparent mismatches into a file full of matches.
  */
+type SolveOutcome =
+  | { readonly kind: 'solved'; readonly subset: readonly OpenPromise[] }
+  | { readonly kind: 'none' }
+  /** The batch is larger than the bounded search may hold. Nothing was compared. */
+  | { readonly kind: 'not_attempted'; readonly candidates: number; readonly limit: number };
+
 function solveAgainst(
   gross: Money,
   expectedNet: Money,
@@ -1006,16 +1296,21 @@ function solveAgainst(
   policy: SourcePolicy,
   owed: (promise: OpenPromise) => Money,
   limits: SubsetLimits,
-): readonly OpenPromise[] | null {
+): SolveOutcome {
   const reachable = candidates.filter((promise) => withinReach(promise, valueDate, policy));
-  if (reachable.length === 0) return null;
+  if (reachable.length === 0) return { kind: 'none' };
 
   const byGross = uniqueSubsetSummingTo(reachable, (p) => owed(p).kobo, gross.kobo, limits);
-  if (byGross.kind === 'unique') return byGross.subset;
-  if (byGross.kind === 'undecidable') return null;
+  if (byGross.kind === 'unique') return { kind: 'solved', subset: byGross.subset };
+  // The pool is the same for both attempts, so a pool too large for the first is too large
+  // for the second. Reported once, and reported as what it is.
+  if (byGross.kind === 'not_attempted') {
+    return { kind: 'not_attempted', candidates: byGross.candidates, limit: byGross.limit };
+  }
+  if (byGross.kind === 'undecidable') return { kind: 'none' };
 
   const model = policy.expectedFee;
-  if (!model) return null;
+  if (!model) return { kind: 'none' };
 
   const byNet = uniqueSubsetSummingTo(
     reachable,
@@ -1026,7 +1321,7 @@ function solveAgainst(
     expectedNet.kobo,
     limits,
   );
-  return byNet.kind === 'unique' ? byNet.subset : null;
+  return byNet.kind === 'unique' ? { kind: 'solved', subset: byNet.subset } : { kind: 'none' };
 }
 
 /**

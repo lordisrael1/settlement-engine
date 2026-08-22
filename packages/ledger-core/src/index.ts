@@ -30,6 +30,7 @@ export {
   bookBankConfirmedSettlement,
   bookReversal,
   bookChargeback,
+  bookReserveRelease,
   bookReturnedPayout,
   bookResolutionAdjustment,
   UnbookablePaymentError,

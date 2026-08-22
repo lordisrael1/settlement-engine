@@ -87,15 +87,31 @@ and costs a week of not knowing. But the practical reading is:
 ### What this means at volume
 
 The candidate pool is filtered only by the settlement window before the search
-(`solveAgainst` in `match.ts` calls `withinReach`, then hands the survivors straight to
+(`solveAgainst` in `match.ts` calls `withinReach`, then hands the survivors to
 `uniqueSubsetSummingTo`). For a merchant taking 10,000 payments a day on a T+2 rail, the
-promises open inside that window number in the tens of thousands — far past 24. The 24 that
-get searched are simply the first 24 the store returned, in no particular relation to the
-payout being solved.
+promises open inside that window number in the tens of thousands — far past 24.
 
-So at volume, on the sources that do not name their payouts (Nomba, Monnify), tier 3 should
-be expected to escalate rather than match. Tiers 1 and 2 — reference match and payout match —
+**What happens past the bound changed, and it matters more than the number.** The search used
+to `.slice()` the pool down to 24 and search the prefix — so the 24 that got searched were
+simply the first 24 the store returned, in no particular relation to the payout being solved,
+and a truncated search that found nothing reported `none`. `none` is the answer that produces
+`PHANTOM_CREDIT`: a queue entry asserting that no combination of your promises adds up to this
+payout, with `amount_differs` beside each near-miss. Every word of that was a claim about
+arithmetic nobody performed.
+
+The search now **refuses rather than truncates**. A pool larger than `maxCandidates` returns
+`not_attempted`, which the matcher escalates as `BATCH_TOO_LARGE` with every candidate marked
+`not_attempted` (ADR-0070). The queue entry says "we did not look", which is a different
+sentence from "we looked and nothing fitted" and sends a person somewhere different.
+
+So at volume, on the sources that do not name their payouts (Nomba, Monnify), tier 3 should be
+expected to *decline* rather than match. Tiers 1 and 2 — reference match and payout match —
 are unaffected, and they are what carries Flutterwave, which reports the payout explicitly.
+
+The bound is now configuration: `RECON_SUBSET_MAX_CANDIDATES`, `RECON_SUBSET_MAX_SIZE`,
+`RECON_SUBSET_MAX_STEPS`. Raising the first without the third buys `undecidable` rather than
+answers, because `maxSteps` is what actually stops the search — and the ambiguity column above
+is the reason raising it at all mostly produces more ambiguity.
 
 The honest framing: **this is a reconciliation core whose automatic batch-matching is
 calibrated for small-batch reality.** Raising the ceiling is not a matter of a bigger
@@ -173,8 +189,23 @@ Stated so the gaps are not mistaken for claims.
   `reconcile` over a large seeded corpus is not, because building a realistic corpus at that
   size is itself a piece of work.
 - **No concurrency.** Every number is one writer, one reader, one process. Nothing here says
-  what happens with eight workers competing for the same rows.
+  what happens with eight workers competing for the same rows — and there is a known
+  structural answer waiting to be measured: every booking for a merchant contends on the
+  `psp_receivable` row of `account_balances`, so `FOR UPDATE SKIP LOCKED` lets workers claim
+  different inbox rows in parallel and then serialises them on that one upsert. Adding workers
+  should stop raising throughput at that point. Lock *ordering* is no longer a factor —
+  `postTransaction` sorts its per-account upserts, which removes the deadlock class entirely
+  (ADR-0073) — so what remains is contention, which costs latency rather than failed
+  transactions. Fixing it is per-account sharding or dropping the cache to a
+  periodically-materialised view, and both are deferred until there is traffic to measure
+  (ADR-0053).
 - **No sustained-load or memory profile.** These are short runs, not soak tests, and say
   nothing about behaviour over hours.
 - **Bank-format conversion is out of scope entirely** — per-bank CSV to the canonical
-  statement shape happens upstream of this system, so its cost is not represented here.
+  statement shape happens upstream of this system, so its cost is not represented here. Note
+  that ingest now checks two clauses of that hand-off (unique ids, ISO-8601 dates), which adds
+  a `Set` insert per row and one primary-key lookup per *conflicting* row in
+  `recordBankLines`. Re-ingesting an unchanged five-thousand-row file therefore costs five
+  thousand extra index lookups and reports nothing; that is the price of being able to tell a
+  redelivery from a collision, and a collision is a credit that would otherwise have
+  disappeared (ADR-0068).

@@ -4,6 +4,7 @@ import { accept } from '@recon/inbox';
 import { sourceProfile, verifyWebhook } from '@recon/ingest';
 import { refuseCardData } from '@recon/protect';
 
+import { addressOf, rateLimit } from '../ratelimit.js';
 import type { Services } from '../services.js';
 
 /**
@@ -40,6 +41,20 @@ import type { Services } from '../services.js';
  */
 export const webhookRoutes: FastifyPluginCallback<Services> = (app, services, done) => {
   const { pool, config, now } = services;
+
+  // Before anything else in this scope, including the body parser below.
+  //
+  // This is the only unauthenticated write in the system, and the work of deciding a
+  // delivery is *not* authentic all happens before the 401: the body is buffered and an
+  // HMAC-SHA512 is computed over every byte of it. Junk never reaches the database, which
+  // was always the important half — but it still costs CPU and memory in proportion to how
+  // much of it arrives, on a URL anybody who has read the docs can find. Keyed by client
+  // address because there is no principal here by design (ADR-0052).
+  //
+  // Per-process and in-memory: two replicas allow twice the rate and a restart forgets
+  // everything. That is the floor, not the control — see `ratelimit.ts` and the deployment
+  // notes in the README for why the real limit belongs at a gateway.
+  rateLimit(app, config.rateLimits.webhook, addressOf, now);
 
   // Encapsulated in this plugin only: the management routes keep Fastify's JSON parsing.
   // Removing the built-ins first matters — the default `application/json` parser would
@@ -81,8 +96,8 @@ export const webhookRoutes: FastifyPluginCallback<Services> = (app, services, do
       // turns it into the status.
       sourceProfile(source);
 
-      const secret = config.webhookSecret(source);
-      if (!secret) {
+      const secret = config.webhookSecrets(source);
+      if (secret.length === 0) {
         return reply.code(503).send({
           error:
             `No webhook secret is configured for "${source}", so this delivery cannot be ` +

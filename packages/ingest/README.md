@@ -11,6 +11,34 @@ has produced a clean canonical event; deciding what to do with that event, and r
 it happened, belong to layers allowed to own state. No clock, no network, no I/O
 ([ADR-0020](../../docs/adr/0020-ingest-has-no-database.md)).
 
+## The bank hand-off is a contract, and it is checked
+
+There is no `pay-normalize` for bank statements and there could not be one: every Nigerian
+bank exports a different CSV and several change it without notice. So this package defines one
+canonical statement shape and expects the caller to have converted into it, with the per-bank
+knowledge left where it is maintained
+([ADR-0057](../../docs/adr/0057-bank-evidence-arrives-as-an-upload.md)).
+
+That hand-off sits directly on top of the only evidence in the system that can book cash, so
+two clauses of it are enforced here rather than assumed of a converter nobody in this
+repository wrote ([ADR-0068](../../docs/adr/0068-the-bank-file-is-the-trust-boundary.md)):
+
+**`id` is unique within the account.** Most Nigerian exports have no per-row id, so a converter
+synthesises one — and a hash of date, amount and narration collides the day two customers pay
+the same ₦5,000 subscription with the same narration. Include the running balance or a
+within-file sequence. A repeated id inside one file is refused as `colliding-identity` (not
+`malformed`: nothing about the row is malformed, the converter's scheme is) and reported as a
+`colliding_identity` anomaly keyed by the format, so a broken scheme is one queue entry rather
+than a page of them.
+
+**`date` is ISO-8601.** Not "whatever `new Date()` accepts". `new Date("02/01/2026")` is the
+1st of February in every JavaScript engine and a DD/MM export means the 2nd of January — a
+month of drift into the window that decides whether a credit can match a payout. A bare
+`YYYY-MM-DD` is anchored to UTC explicitly, because `new Date("2026-01-02")` is UTC midnight
+while `new Date("2026-01-02T00:00:00")` is *local* midnight, and the calendar arithmetic
+downstream is measured in days. The drift record carries the *shape* of the bad date rather
+than its value, or a five-thousand-row file would produce five thousand anomalies.
+
 ## This package is thin
 
 `@pay-normalize/*` already contains the hard knowledge and is published, so it is imported

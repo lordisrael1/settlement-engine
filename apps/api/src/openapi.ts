@@ -479,7 +479,12 @@ export const OPERATIONS: Readonly<Record<string, Partial<FastifySchema> & Record
         'What the run did, rather than everything it looked at — the run object carries every ' +
           'match and rejected candidate it considered, which is megabytes on a busy day and not ' +
           'what the caller asked. Bounded by `RECON_RECONCILE_LIMIT`: subset-sum over an ' +
-          'unbounded set of open promises is how a matcher stops returning (ADR-0053).',
+          'unbounded set of open promises is how a matcher stops returning (ADR-0053). ' +
+          '`window` says how much of each record this run actually read and whether it ' +
+          'reached the end — a run over a sample and a run over the books are otherwise ' +
+          'indistinguishable — and `queue.withheld` counts the exceptions it declined to ' +
+          'close because it never looked at their subjects, or because a person owns them ' +
+          '(ADR-0075).',
         {
           type: 'object',
           properties: {
@@ -491,9 +496,82 @@ export const OPERATIONS: Readonly<Record<string, Partial<FastifySchema> & Record
             booked: { type: 'array', items: { type: 'object', additionalProperties: true } },
             failures: { type: 'array', items: { type: 'object', additionalProperties: true } },
             queue: { type: 'object', additionalProperties: true },
+            window: { type: 'object', additionalProperties: true },
           },
         },
       ),
+      401: UNAUTHORIZED,
+    },
+  },
+
+  'GET /reserves': {
+    response: {
+      200: json(
+        'Reserves a PSP withheld and has not returned, oldest first. `psp_reserve` is an ' +
+          'asset — the money is ours, held elsewhere — and the balance alone is unfalsifiable: ' +
+          'a source returning reserves on schedule and one returning none produce the same ' +
+          'number. A hold with `dueAt: null` belongs to a source that declared no release ' +
+          'schedule, so it is never overdue and never clears itself (ADR-0071).',
+        {
+          type: 'object',
+          properties: {
+            reserves: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          },
+        },
+      ),
+      401: UNAUTHORIZED,
+    },
+  },
+
+  'GET /bank/position': {
+    response: {
+      200: json(
+        "Our `bank_account`, summed from entries, against the running balance on the last " +
+          'statement line ingested. Catches a half-ingested statement or a debit nobody ' +
+          'modelled. It does **not** prove the statement came from the bank — a fabricated ' +
+          'file carries a fabricated running balance and agrees with itself perfectly, which ' +
+          'is why the trust boundary here is a human comparison recorded at ' +
+          'POST /bank/attestations (ADR-0068). A non-zero difference is expected: the real ' +
+          'account holds movements this system does not model.',
+        {
+          type: 'object',
+          properties: {
+            bankAccountId: { type: 'string' },
+            ledgerBalance: MONEY,
+            statementClosing: { ...MONEY, nullable: true },
+            statementAt: { type: 'string', format: 'date-time', nullable: true },
+            difference: { ...MONEY, nullable: true },
+            differenceIsExpected: { type: 'string' },
+            lastAttestation: { type: 'object', additionalProperties: true, nullable: true },
+          },
+        },
+      ),
+      401: UNAUTHORIZED,
+    },
+  },
+
+  'POST /bank/attestations': {
+    response: {
+      201: json(
+        'Recorded. This is the only control over a fabricated bank statement, and it is ' +
+          'out-of-band by necessity: cash is booked from an uploaded file, nothing proves the ' +
+          'file came from the bank, and `verify` cannot catch a fabrication because a ' +
+          'fabricated statement that balances is internally consistent. Append-only — an ' +
+          'attestation that can be edited afterwards is not evidence that anybody checked. ' +
+          '`attestedBy` is the authenticated principal, never a name the caller supplied.',
+        {
+          type: 'object',
+          properties: {
+            bankAccountId: { type: 'string' },
+            asOf: { type: 'string', format: 'date-time' },
+            portalBalance: MONEY,
+            ledgerBalance: MONEY,
+            difference: MONEY,
+            attestedBy: { type: 'string' },
+          },
+        },
+      ),
+      400: problem('`portalBalanceKobo` must be an integer, as a string.'),
       401: UNAUTHORIZED,
     },
   },

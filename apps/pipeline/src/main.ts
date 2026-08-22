@@ -17,7 +17,13 @@ import {
 } from '@recon/ledger-core';
 import { buildPolicy } from '@recon/policy';
 import {
+  attestBankBalance,
+  bankPosition,
+  collisionDraft,
+  lastAttestation,
+  raiseExceptions,
   reconcile,
+  reservePositions,
   recordBankLines,
   recordEvidence,
   recordPayouts,
@@ -75,6 +81,8 @@ const COMMANDS = [
   'ingest-bank',
   'reconcile',
   'exceptions',
+  'reserves',
+  'attest-bank',
   'replay',
   'evidence-retention',
   'bench',
@@ -260,6 +268,27 @@ async function main(argv: readonly string[]): Promise<number> {
         const stored = await recordBankLines(pool, result.lines);
         line();
         line(`  ${stored.stored} stored, ${stored.duplicates} already seen.`);
+
+        // Two distinct credits wearing one id. Not a duplicate, not stored, and the loudest
+        // thing this command can say — because the alternative is a quiet drop and a payout
+        // that mysteriously never confirms three days later (ADR-0068).
+        if (stored.collisions.length > 0) {
+          await raiseExceptions(pool, stored.collisions.map(collisionDraft), new Date());
+          line();
+          line(`  \x1b[31m${stored.collisions.length} row(s) NOT stored: id already held by a different row.\x1b[0m`);
+          for (const collision of stored.collisions) {
+            line(
+              `    ${collision.idempotencyKey}  differs in ${collision.differing.join(', ')}` +
+                `  (${format(collision.arriving.amount)}, ${collision.arriving.narration})`,
+            );
+          }
+          line('    Your statement ids are not unique. Include the running balance or a');
+          line('    within-file sequence in them, then re-upload — a hash of date, amount and');
+          line('    narration collides on two genuine same-day credits and drops one.');
+          line('    Each is queued as BANK_LINE_COLLISION; see `exceptions`.');
+          return 1;
+        }
+
         line('  This is the only evidence that can book cash. Run `reconcile`.');
         return result.lines.length > 0 ? 0 : 1;
       }
@@ -270,9 +299,23 @@ async function main(argv: readonly string[]): Promise<number> {
         line('  Stage 2: promises against what the PSPs say they are sending.');
         line('  Stage 3: those reports against what the bank says arrived.');
         line();
+        // Bounded, and the bound is visible. A run that hits it reads a *sample* — and
+        // stops clearing exceptions whose subjects it never loaded, which is the difference
+        // between "the problem went away" and "we did not look" (ADR-0075). The report says
+        // so in yellow when it happens.
+        const flag = argv.find((arg) => arg.startsWith('--limit='));
+        const asked = flag ? Number(flag.slice('--limit='.length)) : NaN;
+        const envLimit = Number(process.env['RECON_RECONCILE_LIMIT']);
+        const limit = Number.isInteger(asked) && asked > 0
+          ? asked
+          : Number.isInteger(envLimit) && envLimit > 0
+            ? envLimit
+            : 1000;
+
         const run = await reconcile(pool, {
           asOf: new Date(),
           policyFor: await buildPolicy(pool, MERCHANT),
+          limit,
         });
         printReconciliation(run);
         return run.failures.length === 0 ? 0 : 1;
@@ -325,6 +368,130 @@ async function main(argv: readonly string[]): Promise<number> {
           asOf: new Date(),
           apply: argv.includes('--apply'),
         });
+      }
+
+      /**
+       * Our money, in somebody else's account, and how long it has been there.
+       *
+       * `psp_reserve` is an asset and the balance alone is unfalsifiable: a PSP that returns
+       * reserves on schedule and one that never returns any produce the same number. This is
+       * that number taken apart — which payout, withheld when, due when, how much is still
+       * out (ADR-0071).
+       */
+      case 'reserves': {
+        await runMigrations(pool, MIGRATIONS);
+        heading('Reserves outstanding');
+        line('  Withheld by a PSP and not yet returned. Overdue ones are also in the queue.');
+        line();
+
+        const positions = await reservePositions(pool);
+        if (positions.length === 0) {
+          line('  Nothing outstanding. Either no source withholds, or everything came back.');
+          return 0;
+        }
+
+        const now = new Date();
+        for (const position of positions) {
+          const overdue = position.dueAt !== null && position.dueAt < now;
+          const due =
+            position.dueAt === null
+              ? 'no schedule declared'
+              : `due ${position.dueAt.toISOString().slice(0, 10)}`;
+          line(
+            `  ${overdue ? '\x1b[31m!\x1b[0m' : ' '} ${position.inflowKey.padEnd(20)}` +
+              ` ${format(position.outstanding).padStart(14)} of ${format(position.withheld).padStart(14)}` +
+              `  withheld ${position.withheldAt.toISOString().slice(0, 10)}  ${due}`,
+          );
+        }
+
+        line();
+        line('  A source with no declared schedule is never overdue and never clears itself.');
+        line('  That is not a bug: it is what "they promised nothing" looks like.');
+        return 0;
+      }
+
+      /**
+       * The control the architecture cannot perform for itself.
+       *
+       * Cash is booked from an uploaded file, and nothing proves the file came from the bank
+       * — no signature, no feed, no independent check. `verify` does not catch a fabricated
+       * statement and could not: it proves the books are internally consistent, and a
+       * fabricated statement that balances is internally consistent. The only real control
+       * is a person opening the bank's own portal and comparing (ADR-0068).
+       *
+       * With no argument this prints the comparison the system *can* make on its own — our
+       * balance against the bank's own running balance on the last line we ingested — which
+       * catches a half-ingested statement but proves nothing about provenance. With
+       * `--balance` it records what a named person read in the portal.
+       */
+      case 'attest-bank': {
+        await runMigrations(pool, MIGRATIONS);
+        const account = process.env['RECON_BANK_ACCOUNT'] ?? 'primary';
+        const position = await bankPosition(pool, account);
+
+        heading(`Bank position — ${account}`);
+        line(`  books say                 ${format(position.ledgerBalance).padStart(16)}`);
+        line(
+          `  last statement's own      ` +
+            (position.statementClosing
+              ? `${format(position.statementClosing).padStart(16)}  ` +
+                `(value date ${position.statementAt?.toISOString().slice(0, 10)})`
+              : '     — no statement line reports a running balance'),
+        );
+        if (position.difference) {
+          line(`  difference                ${format(position.difference).padStart(16)}`);
+          line();
+          line('  A difference here is expected: the real account holds movements this system');
+          line('  never models — supplier payments, salaries, standing orders. The question is');
+          line('  not whether it is zero but whether anybody can say what it consists of.');
+        }
+
+        const balance = argv.find((arg) => arg.startsWith('--balance='));
+        if (!balance) {
+          const last = await lastAttestation(pool, account);
+          line();
+          line(
+            last
+              ? `  Last checked against the bank's portal ${last.asOf.toISOString().slice(0, 10)} ` +
+                  `by ${last.attestedBy} (difference ${format(last.difference)}).`
+              : `  \x1b[33mNobody has ever compared these books to the bank's own portal.\x1b[0m`,
+          );
+          line();
+          line('  This is the trust boundary. Cash is booked from an uploaded file and nothing');
+          line('  proves that file came from the bank; `verify` cannot catch a fabricated one,');
+          line('  because a fabricated statement that balances is internally consistent.');
+          line('  Record a check:  attest-bank --balance=<naira> [--note="..."]');
+          return 0;
+        }
+
+        const naira = balance.slice('--balance='.length).replace(/,/g, '');
+        if (!/^-?\d+(\.\d{1,2})?$/.test(naira)) {
+          console.error('usage: attest-bank --balance=<naira, e.g. 1450320.55> [--note="..."]');
+          return 2;
+        }
+        const [whole = '0', fraction = ''] = naira.replace('-', '').split('.');
+        const kobo = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0'));
+
+        const note = argv.find((arg) => arg.startsWith('--note='));
+        const attested = await attestBankBalance(pool, {
+          bankAccountId: account,
+          asOf: new Date(),
+          portalBalance: money(naira.startsWith('-') ? -kobo : kobo),
+          // A person, not a service account. The same standard `resolutions` holds, because
+          // this is the same kind of act: a human asserting something the machine cannot.
+          attestedBy: process.env['RECON_OPERATOR'] ?? 'cli',
+          note: note ? note.slice('--note='.length) : null,
+          recordedAt: new Date(),
+        });
+
+        line();
+        line(`  Recorded by ${attested.attestedBy}.`);
+        line(`  portal ${format(attested.portalBalance)}  −  books ${format(attested.ledgerBalance)}`);
+        line(`  difference ${format(attested.difference)}`);
+        line();
+        line('  Appended, never edited. An attestation that can be changed afterwards is not');
+        line('  evidence that somebody checked; it is evidence that somebody has a row.');
+        return 0;
       }
 
       case 'exceptions': {

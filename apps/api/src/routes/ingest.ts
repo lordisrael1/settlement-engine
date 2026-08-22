@@ -5,6 +5,8 @@ import { anomalySeverity, isDegraded } from '@recon/canon';
 import { ingestBankStatement, ingestSettlement } from '@recon/ingest';
 import {
   clearConformed,
+  collisionDraft,
+  raiseExceptions,
   recordAnomalies,
   recordBankLines,
   recordEvidence,
@@ -13,6 +15,7 @@ import {
 } from '@recon/reconciler';
 
 import { principalOf, requireApiKey } from '../auth.js';
+import { addressOf, rateLimit } from '../ratelimit.js';
 import { asMoney } from '../serialise.js';
 import type { Services } from '../services.js';
 
@@ -42,6 +45,17 @@ import type { Services } from '../services.js';
  */
 export const ingestRoutes: FastifyPluginCallback<Services> = (app, services, done) => {
   const { pool, config, now } = services;
+
+  // Uploads are large by design — a settlement export is not a webhook — so the same
+  // per-caller ceiling the management routes use applies here, and for a sharper reason:
+  // `uploadBytes` defaults to 32MB and a loop uploading at that size is a memory problem
+  // long before it is a rate problem.
+  rateLimit(
+    app,
+    config.rateLimits.management,
+    (request) => request.principal?.name ?? `anon:${addressOf(request)}`,
+    now,
+  );
 
   app.addHook('onRequest', requireApiKey(config));
 
@@ -150,13 +164,22 @@ export const ingestRoutes: FastifyPluginCallback<Services> = (app, services, don
       });
 
       await recordEvidence(pool, result.evidence, bytes, config.vault);
-      const lines = await recordBankLines(pool, result.lines);
+      const { collisions, ...lines } = await recordBankLines(pool, result.lines);
       const drift = await noteDrift(
         services,
         request.query.bank ?? config.bank,
         result,
         now(),
       );
+
+      // A collision is money about to disappear, so it goes to the queue a person actually
+      // reads rather than only into this response — which a cron job will not be reading
+      // (ADR-0068). Raised here rather than inside `recordBankLines` because the store's job
+      // is to store: the queue is the reconciler's vocabulary, and the deployable is where
+      // the two are joined.
+      if (collisions.length > 0) {
+        await raiseExceptions(pool, collisions.map(collisionDraft), now());
+      }
 
       return reply.code(201).send({
         evidenceId: result.evidence.evidenceId,
@@ -165,6 +188,27 @@ export const ingestRoutes: FastifyPluginCallback<Services> = (app, services, don
         lines,
         rejected: result.rejected,
         ...drift,
+        ...(collisions.length > 0
+          ? {
+              collisions: collisions.map((collision) => ({
+                idempotencyKey: collision.idempotencyKey,
+                differing: collision.differing,
+                arriving: {
+                  amount: asMoney(collision.arriving.amount),
+                  valueDate: collision.arriving.valueDate.toISOString(),
+                  narration: collision.arriving.narration,
+                },
+                storedEvidenceId: collision.stored.evidenceId,
+              })),
+              degraded:
+                `${collisions.length} row(s) in this statement claim an id that a different ` +
+                `row already holds, and were NOT stored. This is not a redelivery — it is two ` +
+                `distinct credits your converter cannot tell apart, and one of them is money ` +
+                `this system will never see. Fix the id scheme (include the running balance ` +
+                `or a within-file sequence) and re-upload; each collision is in the exception ` +
+                `queue as BANK_LINE_COLLISION.`,
+            }
+          : {}),
         booked: 'nothing yet — run POST /reconcile/runs; this is the only evidence that can',
       });
     },

@@ -20,6 +20,29 @@ claims deliveries with `FOR UPDATE SKIP LOCKED`, one database transaction per de
 the booking and the record that it was booked land together or not at all. Scaling the
 workers means starting more of them.
 
+## Retries back off
+
+A handler that *throws* is saying "I could not do my job just now", which is the only
+retryable case. It used to be retried on the drain's own fixed interval, which meant a
+delivery's whole budget — eight attempts at 500ms — was spent in **four seconds**.
+
+For the failure this design was built around that is fine: when Postgres is unreachable the
+transaction fails, `attempts` never moves, and the delivery waits as long as it has to. The
+dangerous case is Postgres *reachable* and the handler throwing for a reason that would have
+cleared itself — a deadlock, a serialization failure, a replica hiccup. Eight of those inside
+four seconds retires an authentic payment to `failed`, permanently, where only a person can
+bring it back.
+
+`next_attempt_at` gates the claim, and `retryAfter` is exponential from one second to a
+five-minute cap. The jitter is derived from the delivery id rather than drawn randomly,
+because two workers must compute the same delay for the same row — a redrained queue that
+behaves differently is a queue this package cannot claim to be resumable
+([ADR-0073](../../docs/adr/0073-retries-back-off-and-secrets-overlap.md)).
+
+`DrainReport.deferred` and `inboxDepth`'s `deferred` and `oldestPendingAt` exist because a
+stalled queue and a backing-off queue are both "a pending count that is not going down", and
+one of them is the system working exactly as designed.
+
 ## It does not depend on ingest
 
 This package knows deliveries exist and that somebody can interpret them. It has never heard

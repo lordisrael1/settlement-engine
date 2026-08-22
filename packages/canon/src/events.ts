@@ -62,6 +62,16 @@ export const DOMAIN_EVENT_TYPES = [
   'SettlementBooked',
   /** The bank sent a confirmed payout back. An exact negation of the booking above. */
   'PayoutReturned',
+  /**
+   * A reserve the PSP had withheld came back.
+   *
+   * Kept apart from `SettlementBooked` although both increase `bank_account` from a bank
+   * credit, because they say different things: a settlement discharges a receivable, and
+   * this discharges nothing — it moves an asset we already held from `psp_reserve` into
+   * cash. Collapsing them would make the log claim that payments settled on a day when no
+   * payment settled (ADR-0071).
+   */
+  'ReserveReleased',
 
   // ── Corrections ───────────────────────────────────────────────────────────
   /** A promise was undone before any money came, booked as contra-income. */
@@ -114,6 +124,7 @@ export const BOOKING_EVENTS: readonly DomainEventType[] = [
   'PaymentAuthorized',
   'SettlementBooked',
   'PayoutReturned',
+  'ReserveReleased',
   'ReversalBooked',
   'TransactionReversed',
   'ChargebackBooked',

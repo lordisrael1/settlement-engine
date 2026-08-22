@@ -27,10 +27,27 @@ const SERVICES = {
     merchantId: 'test-merchant',
     bankAccountId: 'test-account',
     bank: 'test-bank',
-    webhookSecret: () => null,
+    webhookSecrets: () => [],
     reconcileLimit: 1000,
     exportTtlMs: 900_000,
     vault: {},
+    // The limiters register `onRequest` hooks, so they have to exist for the router to
+    // assemble — and they are off, because this suite asserts the shape of the route table
+    // and a 429 is behaviour.
+    rateLimits: {
+      webhook: { perWindow: 0, windowMs: 60_000, maxKeys: 0 },
+      management: { perWindow: 0, windowMs: 60_000, maxKeys: 0 },
+    },
+    alerts: {
+      inboxPending: 0,
+      inboxFailed: 0,
+      inboxAgeMs: 0,
+      openExceptions: 0,
+      reconcileAgeMs: 0,
+      attestationAgeMs: 0,
+    },
+    reconcileIntervalMs: 0,
+    subsetLimits: { maxCandidates: 24, maxSubsetSize: 12, maxSteps: 200_000 },
   },
   now: () => new Date('2026-08-20T00:00:00Z'),
 } as unknown as Services;

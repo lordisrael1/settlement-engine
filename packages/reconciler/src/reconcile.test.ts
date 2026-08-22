@@ -128,6 +128,8 @@ describe('three-way reconciliation', { skip: DATABASE_URL ? false : 'set DATABAS
               calendar: CALENDAR,
               expectedFee: (gross: Money) => feeFor(CARD, gross, CARD_CONTRACT),
               bankChargeAllowance: 10_000n,
+              pairEqualAmounts: true,
+              reserveReleaseDays: 90,
             }
           : null) satisfies PolicyLookup,
     };

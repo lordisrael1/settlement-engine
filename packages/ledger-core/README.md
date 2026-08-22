@@ -51,6 +51,8 @@ change log ([ADR-0016](../../docs/adr/0016-lifecycle-state-is-derived.md)).
     reverse(db, transactionId, at) a mirror-image transaction, never an edit
     transition(db, input)          append a lifecycle change; terminal states are terminal
     bookAuthorizedPayment(db, payment, at)
+    bookReversal(db, event, promise)          whole or partial; only a whole one ends the promise
+    bookReserveRelease(db, confirmation, returned)   the one credit that discharges nothing
     runMigrations(pool, dirs)      apply .sql files once, checksum-verified
     replay(db), rebuildBalancesFromEvents(db)
 
@@ -62,6 +64,29 @@ Both belong here, because both are statements about our chart of accounts
 `reverse()` is an exact negation and nothing more. Booking a refund as contra-income is a
 domain decision belonging to the reconciler
 ([ADR-0024](../../docs/adr/0024-reverse-is-an-exact-negation.md)).
+
+`bookReversal` handles a refund of **part** of a payment: when the amount coming back is less
+than the receivable, it books the entries for that part and leaves the promise `authorized`,
+because the PSP still owes us the rest and a payout is still coming for it. Transitioning to
+`reversed` on a ₦3,000 refund against a ₦10,000 charge would close a promise that is ₦7,000
+alive, and the ₦7,000 would resurface later as a settlement matching nothing
+([ADR-0069](../../docs/adr/0069-partial-refunds-and-chargebacks.md)). It is the same test
+`bookBankConfirmedSettlement` already applies to a part-settled promise, in the other
+direction.
+
+`bookReserveRelease` is the one bank credit that discharges no receivable: a rolling reserve
+coming back moves `psp_reserve` into `bank_account` and closes nothing, because nothing new was
+earned. It cannot go through `bookBankConfirmedSettlement`, which refuses an empty discharge
+list — correctly, since money with nothing to discharge is otherwise a phantom credit
+([ADR-0071](../../docs/adr/0071-reserves-carry-a-deadline.md)).
+
+`postTransaction` sorts its per-account balance upserts by account id. Each upsert takes a row
+lock, and two concurrent transactions taking the same locks in different orders deadlock — which
+was reachable without any exotic concurrency, since a settlement confirmation touched its
+accounts in the order the PSP itemised its deductions. A fixed order removes the deadlock class
+entirely. It does nothing for *contention* on `psp_receivable`, which is a design property of
+the cache rather than something an index fixes
+([ADR-0073](../../docs/adr/0073-retries-back-off-and-secrets-overlap.md), ADR-0053).
 
 ## Tests
 

@@ -59,6 +59,7 @@ export {
 export {
   acknowledge,
   clearVanished,
+  collisionDraft,
   draftFrom,
   exceptionAt,
   exceptionHistory,
@@ -66,9 +67,12 @@ export {
   raiseExceptions,
   resolveByHuman,
   resolveException,
+  type ClearOutcome,
+  type ClearScope,
   type ExceptionDraft,
   type QueueFilter,
   type RaiseOutcome,
+  type SubjectWindow,
 } from './exceptions.js';
 
 export {
@@ -121,6 +125,8 @@ export {
   recordPayouts,
   recordSettlementLines,
   recordBankLines,
+  type BankLineCollision,
+  type StoredBankLines,
   unallocatedPayouts,
   unallocatedSettlementLines,
   unmatchedBankLines,
@@ -141,6 +147,18 @@ export {
 } from './store.js';
 
 export {
+  attestBankBalance,
+  bankPosition,
+  lastAttestation,
+  recordReserveMovement,
+  reservePositions,
+  unreleasedReserves,
+  type BankAttestation,
+  type BankPosition,
+  type ReservePosition,
+} from './reserves.js';
+
+export {
   summarize,
   type ConclusionTally,
   type QueueTally,
@@ -154,6 +172,7 @@ export {
   type BookingFailure,
   type ReconcileInput,
   type ReconciliationRun,
+  type WindowReport,
 } from './run.js';
 
 export {

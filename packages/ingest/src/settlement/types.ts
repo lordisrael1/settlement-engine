@@ -15,6 +15,11 @@ export interface RejectedRow {
    * `malformed` — the row is structurally unusable or its own numbers disagree.
    * `not-a-settlement` — the row is perfectly valid but is not money arriving:
    *   a pending or failed row, a debit, a currency we do not keep books in.
+   * `colliding-identity` — the row is fine, and an earlier row in this same file already
+   *   claimed its id. Kept apart from `malformed` because nothing about it is malformed:
+   *   the row parses, the money is real, and the *converter's* id scheme is what is broken.
+   *   Filing it as malformed would put "the bank sent us a bad row" in a place where the
+   *   truth is "we cannot tell these two credits apart" (ADR-0068).
    *
    * The distinction matters operationally: a rising `malformed` count means the
    * provider changed their format and an adapter needs updating; a rising
@@ -27,7 +32,7 @@ export interface RejectedRow {
    * — a record type the connector has never seen — filed beside the ordinary pending rows
    * that arrive in their thousands. A count cannot separate those; a keyed record can.
    */
-  readonly kind: 'malformed' | 'not-a-settlement';
+  readonly kind: 'malformed' | 'not-a-settlement' | 'colliding-identity';
   readonly reason: string;
   readonly raw: unknown;
 }

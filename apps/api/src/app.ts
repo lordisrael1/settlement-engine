@@ -8,6 +8,7 @@ import Fastify, {
 
 import { inboxDepth } from '@recon/inbox';
 
+import { alertsFor } from './alerts.js';
 import { statusFor } from './errors.js';
 import { OPENAPI_DOCUMENT, OPERATIONS } from './openapi.js';
 import { evidenceRoutes } from './routes/evidence.js';
@@ -32,7 +33,27 @@ import type { Services } from './services.js';
  * payloads waiting to happen.
  */
 export function buildApp(services: Services, options: FastifyServerOptions = {}): FastifyInstance {
-  const app = Fastify(options);
+  const app = Fastify({
+    ...options,
+    /**
+     * Type coercion off, and this is a money decision rather than a style one.
+     *
+     * Ajv coerces by default, and Fastify leaves that on: a body declaring
+     * `{"portalBalanceKobo": 100}` against a `type: 'string'` schema is quietly turned into
+     * `"100"` and accepted. For most APIs that is a kindness. Here it defeats the reason
+     * every amount crosses this boundary as a decimal string in the first place — a JSON
+     * number is a double, and `9007199254740993` has already lost its last digit by the time
+     * `JSON.parse` returns, so the coerced string is a wrong amount that validates perfectly.
+     *
+     * Refusing the request is the only honest answer: the caller sent a number, and the
+     * number is not the one they meant.
+     *
+     * Set here rather than merged with anything the caller passed, because a caller that
+     * turned it back on would be turning off a control rather than configuring a server, and
+     * the one place that constructs this app for real passes a logger and a proxy flag.
+     */
+    ajv: { customOptions: { coerceTypes: false } },
+  });
 
   /**
    * The specification, generated from the routes and described in `openapi.ts`.
@@ -88,11 +109,23 @@ export function buildApp(services: Services, options: FastifyServerOptions = {})
    * Unauthenticated on purpose: a health check that needs a credential is a health check
    * the load balancer cannot make.
    *
-   * It reports the two numbers that distinguish "up" from "working". A service whose
-   * database is unreachable is not healthy however cheerfully it answers; and an inbox whose
-   * pending count only grows is a service that is accepting deliveries and quietly not
-   * working them, which is the failure this architecture is most exposed to and the one an
-   * HTTP 200 on its own would hide completely.
+   * It reports the numbers that distinguish "up" from "working". A service whose database is
+   * unreachable is not healthy however cheerfully it answers; and an inbox whose pending
+   * count only grows is a service that is accepting deliveries and quietly not working them,
+   * which is the failure this architecture is most exposed to and the one an HTTP 200 on its
+   * own would hide completely.
+   *
+   * **It now reaches a verdict rather than only reporting numbers.** Reporting a depth and
+   * leaving the reader to decide what a big one means is, in practice, nobody deciding: a
+   * monitor watching for a non-200 watches a queue grow all weekend and never fires. So the
+   * thresholds live in configuration, `alerts` names every one that is breached in a
+   * sentence, and the status code moves — which is the one signal every monitor in the world
+   * already understands (ADR-0074).
+   *
+   * Note what it does *not* return any more: the database driver's own error text. A `pg`
+   * connection failure carries the host, the port and sometimes the user, and this endpoint
+   * is unauthenticated. The specifics go to the log, where the person who needs them is; the
+   * caller gets the fact.
    */
   // Registered rather than declared, and the difference is not stylistic: `.get()` adds a
   // route immediately, while `.register()` defers until `ready()`. `@fastify/swagger` collects
@@ -111,18 +144,36 @@ export function buildApp(services: Services, options: FastifyServerOptions = {})
           security: [],
         },
       },
-      async (_request, reply) => {
+      async (request, reply) => {
+        const at = services.now();
+
+        let depth;
         try {
           await services.pool.query('SELECT 1');
-          const depth = await inboxDepth(services.pool);
-          return { status: 'ok', database: 'reachable', inbox: depth };
+          depth = await inboxDepth(services.pool, at);
         } catch (error) {
+          // Logged whole, answered thin. The stack and the connection string are what the
+          // operator needs and exactly what an unauthenticated endpoint must not hand to
+          // whoever is probing it.
+          request.log.error({ err: error }, 'health check could not reach the database');
           return reply.code(503).send({
             status: 'unhealthy',
             database: 'unreachable',
-            error: error instanceof Error ? error.message : String(error),
+            error: 'The database is unreachable. See the service log for the reason.',
           });
         }
+
+        const alerts = await alertsFor(services, depth, at);
+
+        // 200 while merely busy, 503 once something is breached. A monitor that understands
+        // nothing else understands this, which is the only property that matters for the
+        // last mile — getting a person's attention without them remembering to look.
+        return reply.code(alerts.length === 0 ? 200 : 503).send({
+          status: alerts.length === 0 ? 'ok' : 'degraded',
+          database: 'reachable',
+          inbox: depth,
+          alerts,
+        });
       },
     );
   });
